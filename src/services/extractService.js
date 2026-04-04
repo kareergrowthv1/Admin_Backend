@@ -123,11 +123,22 @@ async function extractAndSaveResumeFromText(tenantDb, candidateId, positionId, o
   return { ...result, keywordsCount: keywords.length };
 }
 
+/**
+ * Extract from JD text and save to jd_extract. No file.
+ */
+async function extractAndSaveJdFromText(tenantDb, positionId, orgId, jdText) {
+  const keywords = docExtractor.extractKeywords(jdText || '');
+  await ensureExtractTables(tenantDb);
+  const result = await upsertJdExtract(tenantDb, positionId, orgId, { text: (jdText || '').slice(0, 50000), keywords });
+  return { ...result, keywordsCount: keywords.length };
+}
+
 module.exports = {
   ensureExtractTables,
   upsertJdExtract,
   upsertResumeExtract,
   extractAndSaveJd,
   extractAndSaveResume,
-  extractAndSaveResumeFromText
+  extractAndSaveResumeFromText,
+  extractAndSaveJdFromText
 };

@@ -17,6 +17,7 @@ const FALLBACK_TABLES = [
         candidate_name VARCHAR(255) NOT NULL,
         department VARCHAR(255),
         semester INT,
+        year_of_passing INT,
         email VARCHAR(255) NOT NULL,
         mobile_number VARCHAR(20),
         location VARCHAR(255),
@@ -33,6 +34,14 @@ const FALLBACK_TABLES = [
         candidate_created_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        current_role VARCHAR(255) DEFAULT 'Software Developer',
+        academic_year VARCHAR(100) DEFAULT 'Final Year',
+        registration_paid TINYINT(1) DEFAULT 0,
+        plan_id VARCHAR(36),
+        subscription_expiry DATETIME,
+        dept_id VARCHAR(36),
+        branch_id VARCHAR(36),
+        department_name VARCHAR(255),
         INDEX idx_organization_id (organization_id),
         INDEX idx_status (status),
         INDEX idx_candidate_email (email),
@@ -89,8 +98,13 @@ const startServer = async () => {
         console.log('[Startup] Storage initialized: GCS gs://' + (process.env.GCS_BUCKET || 'qwikhire-prod-storage') + '/' + fileStorageUtil.STORAGE_FOLDER_ID + '/Resume, /JD');
     }
 
+    const scheduler = require('./utils/scheduler');
+
     app.listen(config.port, () => {
         console.log(`Admin Backend running on port ${config.port}`);
+        // Start scheduled tasks
+        scheduler.startPositionExpiryJob();
+        scheduler.startLinkExpiryJob();
     });
 };
 

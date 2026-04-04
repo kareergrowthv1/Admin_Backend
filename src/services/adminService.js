@@ -72,6 +72,11 @@ const createAdminWithDB = async (adminData) => {
         [uniqueOrgId, orgName, clientName || null]
     );
 
+    // Determine is_college flag based on role
+    const roleRows = await db.authQuery('SELECT code FROM auth_db.roles WHERE id = ?', [roleId]);
+    const roleCode = roleRows[0]?.code;
+    const isCollege = roleCode === 'ATS' ? 0 : 1;
+
     // 6. Hash password
     const passwordHash = await bcrypt.hash(password, 12);
 
@@ -80,9 +85,9 @@ const createAdminWithDB = async (adminData) => {
         `INSERT INTO auth_db.users (
             id, organization_id, email, username, password_hash, first_name, last_name,
             phone_number, email_verified, enabled, is_active, is_admin, role_id,
-            client,
+            client, is_college,
             created_at, updated_at, login_attempts_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?)`,
         [
             userId,
             uniqueOrgId, // UNIQUE organizationId for each admin
@@ -98,11 +103,12 @@ const createAdminWithDB = async (adminData) => {
             true, // is_admin
             roleId,
             schemaName, // client = the database name
+            isCollege,
             0 // login_attempts_count
         ]
     );
 
-    console.log(`[AdminService] Admin user created in auth_db: userId=${userId}, organizationId=${uniqueOrgId}, client=${schemaName}, roleId=${roleId}`);
+    console.log(`[AdminService] Admin user created in auth_db: userId=${userId}, organizationId=${uniqueOrgId}, client=${schemaName}, roleId=${roleId}, isCollege=${isCollege}`);
 
     // Send welcome email via Zepto with login credentials and Admin login URL
     const adminLoginUrl = (config.adminLoginUrl || '').trim() || 'your admin portal';
@@ -250,25 +256,41 @@ const provisionAdminSchema = async (adminId) => {
 };
 
 const getCredits = async (tenantDb, organizationId, user) => {
-    console.log(`[AdminService.getCredits] Called with tenantDb=${tenantDb}, organizationId=${organizationId}, user.client=${user?.client}, user.isCollege=${user?.isCollege}`);
+    console.log(`[AdminService.getCredits] Called with tenantDb=${tenantDb}, organizationId=${organizationId}, userClient=${user?.client}, userIsCollege=${user?.isCollege}`);
     if (!organizationId) return null;
 
     let resolvedTenantDb = tenantDb;
     let roleCode = null;
+    let userExpiryInfo = { expiryDate: null };
 
     // PRIMARY: Use authenticated user's client and role directly (most reliable)
-    if (user && user.client) {
-        resolvedTenantDb = user.client;
-        // Determine role from user.isCollege flag
-        roleCode = user.isCollege === true ? 'ADMIN' : 'ATS';
-        console.log(`[AdminService.getCredits] Using authenticated user - client=${resolvedTenantDb}, roleCode=${roleCode} (from user.isCollege=${user.isCollege})`);
+    if (user && (user.client || user.organizationId)) {
+        resolvedTenantDb = user.client || tenantDb;
+        // Determine role from user.isCollege flag (handle numeric/string formats)
+        const userIsCollege = (user.isCollege === true || user.isCollege === 1 || user.isCollege === '1');
+        roleCode = userIsCollege ? 'ADMIN' : 'ATS';
+        console.log(`[AdminService.getCredits] Using authenticated user - client=${resolvedTenantDb}, roleCode=${roleCode} (isCollege flag=${user.isCollege})`);
+        
+        // Fetch expiry date from auth_db
+        try {
+            const userRows = await db.authQuery(
+                `SELECT expiry_date, client FROM auth_db.users WHERE id = ? LIMIT 1`,
+                [organizationId] 
+            );
+            if (userRows[0]) {
+                userExpiryInfo = { expiryDate: userRows[0].expiry_date };
+                if (!resolvedTenantDb && userRows[0].client) resolvedTenantDb = userRows[0].client;
+            }
+        } catch (err) {
+            console.error(`[AdminService.getCredits] Expiry fetch error:`, err.message);
+        }
     }
     // FALLBACK: If no user object, try to lookup from auth_db
     else if (!resolvedTenantDb || resolvedTenantDb === 'auth_db' || resolvedTenantDb === 'superadmin_db') {
         console.log(`[AdminService.getCredits] No user object provided, attempting fallback lookup`);
         // Query by user ID (the URL parameter is the logged-in user's unique ID)
         const userRows = await db.authQuery(
-            `SELECT u.client, r.code as role_code, u.id, u.organization_id, u.email
+            `SELECT u.client, r.code as role_code, u.id, u.organization_id, u.email, u.expiry_date
              FROM auth_db.users u
              LEFT JOIN auth_db.roles r ON u.role_id = r.id
              WHERE u.id = ? AND u.client IS NOT NULL AND u.is_admin = 1 LIMIT 1`,
@@ -278,6 +300,7 @@ const getCredits = async (tenantDb, organizationId, user) => {
         if (userRows[0]?.client) {
             resolvedTenantDb = userRows[0].client;
             roleCode = userRows[0].role_code;
+            userExpiryInfo = { expiryDate: userRows[0].expiry_date };
         } else {
             console.error(`[AdminService.getCredits] Fallback query found no matching admin for userId=${organizationId}`);
             return null;
@@ -289,8 +312,9 @@ const getCredits = async (tenantDb, organizationId, user) => {
         return null;
     }
 
-    const isCollege = roleCode === 'ADMIN';
+    const isCollege = (roleCode === 'ADMIN' || roleCode === 'ROLE0003');
     console.log(`[AdminService.getCredits] Admin type - roleCode=${roleCode}, isCollege=${isCollege}`);
+
     console.log(`[AdminService.getCredits] Querying credits from: ${resolvedTenantDb}`);
 
     // Check if screening columns exist (ATS) or not (College) using INFORMATION_SCHEMA
@@ -321,9 +345,21 @@ const getCredits = async (tenantDb, organizationId, user) => {
 
     console.log(`[AdminService.getCredits] Query returned ${rows.length} rows:`, rows[0] || 'EMPTY');
 
-    if (!rows[0]) return null;
+    let credits = rows[0];
 
-    const credits = rows[0];
+    if (!credits) {
+        console.warn(`[AdminService.getCredits] Missing credits record in ${resolvedTenantDb}. Returning default empty object to avoid dashboard collapse.`);
+        credits = {
+            totalInterviews: 0,
+            utilizedInterviews: 0,
+            totalPositions: 0,
+            utilizedPositions: 0,
+            totalScreening: 0,
+            utilizedScreening: 0,
+            validTill: new Date(new Date().setFullYear(new Date().getFullYear() + 1)),
+            isActive: 1
+        };
+    }
 
     // For college admins, return only interview and position fields with remaining counts
     if (isCollege) {
@@ -341,6 +377,7 @@ const getCredits = async (tenantDb, organizationId, user) => {
             utilizedPositions,
             remainingPositions: totalPositions - utilizedPositions,
             validTill: credits.validTill,
+            expiryDate: userExpiryInfo.expiryDate,
             isActive: credits.isActive
         };
     }
@@ -364,6 +401,7 @@ const getCredits = async (tenantDb, organizationId, user) => {
         utilizedScreening,
         remainingScreening: totalScreening - utilizedScreening,
         validTill: credits.validTill,
+        expiryDate: userExpiryInfo.expiryDate,
         isActive: credits.isActive
     };
 };
@@ -515,8 +553,8 @@ const getCollegeDetails = async (tenantDb, organizationId) => {
                 website_url as websiteUrl, about_us as aboutUs,
                 created_at as createdAt, updated_at as updatedAt
          FROM \`${tenantDb}\`.college_details 
-         WHERE organization_id = ? LIMIT 1`,
-        [orgIdBuffer]
+         WHERE organization_id = ? OR organization_id = ? LIMIT 1`,
+        [orgIdBuffer, organizationId]
     );
 
     if (rows.length === 0) return null;
@@ -585,8 +623,8 @@ const getCompanyDetails = async (tenantDb, organizationId) => {
                 facebook_url as facebookUrl, about_us as aboutUs,
                 created_at as createdAt, updated_at as updatedAt
          FROM \`${tenantDb}\`.company_details 
-         WHERE organization_id = ? LIMIT 1`,
-        [orgIdBuffer]
+         WHERE organization_id = ? OR organization_id = ? LIMIT 1`,
+        [orgIdBuffer, organizationId]
     );
 
     if (rows.length === 0) return null;
@@ -816,6 +854,83 @@ const updateCrossQuestionSettings = async (tenantDb, organizationId, data) => {
     return { success: true };
 };
 
+const getOrganizationInfo = async (organizationId) => {
+    if (!organizationId) throw new Error('Organization ID is required');
+    const rows = await db.authQuery(
+        'SELECT id, name, metadata, is_active as isActive FROM organizations WHERE id = ? LIMIT 1',
+        [organizationId]
+    );
+
+    if (rows.length === 0) return null;
+    
+    const org = rows[0];
+
+    // Attempt to find schemaName from users table since it's missing in organizations
+    let userRows = await db.authQuery(
+        'SELECT client FROM users WHERE (organization_id = ? OR id = ?) AND client IS NOT NULL LIMIT 1',
+        [organizationId, organizationId]
+    );
+    
+    // Binary fallback for schemaName
+    if (userRows.length === 0 && organizationId.length >= 32) {
+        try {
+            const cleanId = organizationId.replace(/-/g, '');
+            if (cleanId.length === 32) {
+                const buffer = Buffer.from(cleanId, 'hex');
+                userRows = await db.authQuery(
+                    'SELECT client FROM users WHERE organization_id = ? AND client IS NOT NULL LIMIT 1',
+                    [buffer]
+                );
+            }
+        } catch (e) {}
+    }
+    const schemaName = userRows.length > 0 ? userRows[0].client : null;
+    
+    // Parse metadata to see if it's a college or company if possible, 
+    // but the main goal is to return the name and basic status.
+    let isCollege = null;
+    try {
+        const metadata = typeof org.metadata === 'string' ? JSON.parse(org.metadata) : org.metadata;
+        if (metadata && metadata.isCollege !== undefined) {
+            isCollege = !!metadata.isCollege;
+        }
+    } catch (e) {}
+
+    // Smart Inference: if isCollege is null but we have a schema, check the schema
+    if (isCollege === null && schemaName) {
+        try {
+            const tableCheck = await db.query(
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND (TABLE_NAME = 'college_details' OR TABLE_NAME = 'COLLEGE_DETAILS') LIMIT 1",
+                [schemaName]
+            );
+            isCollege = tableCheck.length > 0;
+            
+            // Persist back to metadata for performance next time
+            try {
+                const currentMetadata = (typeof org.metadata === 'string' ? JSON.parse(org.metadata) : org.metadata) || {};
+                const updatedMetadata = { ...currentMetadata, isCollege };
+                await db.authQuery(
+                    "UPDATE organizations SET metadata = ? WHERE id = ?",
+                    [JSON.stringify(updatedMetadata), organizationId]
+                );
+                console.log(`[AdminService] Inferred isCollege=${isCollege} for Org=${organizationId} and updated metadata.`);
+            } catch (updateErr) {
+                console.error(`[AdminService] Failed to persist inferred isCollege for ${organizationId}:`, updateErr.message);
+            }
+        } catch (schemaErr) {
+            console.warn(`[AdminService] Could not check schema ${schemaName} for isCollege inference:`, schemaErr.message);
+        }
+    }
+
+    return {
+        id: org.id,
+        name: org.name,
+        schemaName: schemaName,
+        isActive: !!org.isActive,
+        isCollege: isCollege
+    };
+};
+
 module.exports = {
     createAdminWithDB,
     provisionAdminSchema,
@@ -830,5 +945,6 @@ module.exports = {
     getAiScoringSettings,
     updateAiScoringSettings,
     getCrossQuestionSettings,
-    updateCrossQuestionSettings
+    updateCrossQuestionSettings,
+    getOrganizationInfo
 };

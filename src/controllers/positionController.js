@@ -24,6 +24,8 @@ function parseCreateBody(body) {
         jobDescriptionFileName: body.jobDescriptionFileName,
         expectedStartDate: body.expectedStartDate || null,
         applicationDeadline: body.applicationDeadline || null,
+        company_name: body.companyName || body.company_name || null,
+        jobDescriptionText: body.jobDescriptionText || null,
         createdBy: body.createdBy || 'SYSTEM'
     };
 }
@@ -48,6 +50,7 @@ exports.createPosition = async (req, res, next) => {
             jobDescriptionFileName,
             expectedStartDate,
             applicationDeadline,
+            company_name,
             createdBy
         } = parsed;
 
@@ -67,6 +70,8 @@ exports.createPosition = async (req, res, next) => {
         }
 
         const userId = req.headers['x-user-id'] || req.headers['X-User-Id'] || req.headers['X-User-ID'];
+        const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organizationId || req.headers['x-organization-id'];
+        
         const positionData = {
             title,
             domainType,
@@ -79,21 +84,57 @@ exports.createPosition = async (req, res, next) => {
             jobDescriptionFileName,
             expectedStartDate,
             applicationDeadline,
+            company_name,
             createdBy: req.user?.id || createdBy,
-            userId
+            userId,
+            organizationId,
+            actorName: req.user?.fullName || req.user?.name || 'Admin',
+            actorRole: 'Admin'
         };
 
         let result = await positionService.createPosition(req.tenantDb, positionData);
 
-        // If JD file was uploaded in the same request, store to blob and update position with path (no extract JD keyword)
+        // If JD text is provided, extract and save to jd_extract (upsert)
+        if (jobDescriptionText && result && result.id) {
+            try {
+                await extractService.extractAndSaveJdFromText(req.tenantDb, result.id, organizationId, jobDescriptionText);
+            } catch (extractErr) {
+                console.warn('JD text extract on create failed:', extractErr.message);
+            }
+        }
+
+        // If JD file was uploaded in the same request, store to blob and update position with path
         if (req.file && result && result.id) {
             try {
                 const { relativePath } = await fileStorageUtil.storeFile('JD', req.file);
                 await positionService.updatePositionPathOnly(req.tenantDb, result.id, relativePath, req.file.originalname || 'document.pdf');
+                
+                // Also trigger extraction from file if uploaded
+                try {
+                    await extractService.extractAndSaveJd(req.tenantDb, result.id, organizationId, req.file.buffer, req.file.originalname || 'document.pdf');
+                } catch (fileExtractErr) {
+                    console.warn('JD file extract on create failed:', fileExtractErr.message);
+                }
+                
                 result = await positionService.getPositionById(req.tenantDb, result.id, userId);
             } catch (storeErr) {
                 console.warn('JD store on create failed:', storeErr.message);
             }
+        }
+
+        // Global notification trigger for new job
+        try {
+            const { getDb, COLLECTIONS } = require('../config/mongo');
+            const mongoDb = await getDb();
+            await mongoDb.collection(COLLECTIONS.NOTIFICATIONS).insertOne({
+                title: 'New Job Posted!',
+                message: `A new position for "${result.title || 'Job'}" has been added. Check it out now!`,
+                type: 'global',
+                createdAt: new Date(),
+                dismissed: false
+            });
+        } catch (mongoErr) {
+            console.warn('Global notification trigger failed (AdminBackend):', mongoErr.message);
         }
 
         return res.status(201).json({
@@ -131,7 +172,8 @@ exports.getPositions = async (req, res, next) => {
             size: parseInt(size) || 10,
             userId,
             domain,
-            experience
+            experience,
+            createdBy: req.user?.dataFilter?.createdBy || req.query.createdBy
         };
 
         const { positions, totalElements } = await positionService.getPositions(req.tenantDb, filters);
@@ -245,6 +287,18 @@ exports.updatePosition = async (req, res, next) => {
         const userId = req.headers['x-user-id'] || req.headers['X-User-Id'] || req.headers['X-User-ID'];
         const result = await positionService.updatePosition(req.tenantDb, positionId, req.body, userId);
 
+        // If jobDescriptionText is updated, re-extract
+        if (req.body.jobDescriptionText && positionId) {
+            try {
+                const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organizationId || req.headers['x-organization-id'];
+                if (organizationId && req.tenantDb) {
+                    await extractService.extractAndSaveJdFromText(req.tenantDb, positionId, organizationId, req.body.jobDescriptionText);
+                }
+            } catch (extractErr) {
+                console.warn('JD text extract on update failed:', extractErr.message);
+            }
+        }
+
         return res.status(200).json({
             success: true,
             message: 'Position updated successfully',
@@ -267,7 +321,8 @@ exports.updatePosition = async (req, res, next) => {
 exports.getPositionCounts = async (req, res, next) => {
     try {
         const userId = req.headers['x-user-id'] || req.headers['X-User-Id'] || req.headers['X-User-ID'];
-        const counts = await positionService.getPositionCounts(req.tenantDb, userId);
+        const createdBy = req.user?.dataFilter?.createdBy || req.query.createdBy;
+        const counts = await positionService.getPositionCounts(req.tenantDb, userId, { createdBy });
 
         return res.status(200).json({
             success: true,
@@ -285,7 +340,8 @@ exports.getPositionCounts = async (req, res, next) => {
 exports.getFilterMetadata = async (req, res, next) => {
     try {
         const userId = req.headers['x-user-id'] || req.headers['X-User-Id'] || req.headers['X-User-ID'];
-        const metadata = await positionService.getFilterMetadata(req.tenantDb, userId);
+        const createdBy = req.user?.dataFilter?.createdBy || req.query.createdBy;
+        const metadata = await positionService.getFilterMetadata(req.tenantDb, userId, { createdBy });
 
         return res.status(200).json({
             success: true,

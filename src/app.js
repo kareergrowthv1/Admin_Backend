@@ -16,6 +16,8 @@ const authProxyRoutes = require('./routes/authProxy');
 const internalRoutes = require('./routes/internal');
 const privateLinksRoutes = require('./routes/privateLinks');
 const assessmentSummaryRoutes = require('./routes/assessmentSummaries');
+const attendanceRoutes = require('./routes/attendance');
+const tasksRoutes = require('./routes/tasks');
 
 const app = express();
 
@@ -89,6 +91,8 @@ app.use('/extract', extractRoutes);
 app.use('/auth', authProxyRoutes);
 app.use('/internal', internalRoutes);
 app.use('/private-links', privateLinksRoutes);
+app.use('/attendance', attendanceRoutes);
+app.use('/tasks', tasksRoutes);
 
 app.use(errorMiddleware);
 

@@ -4,11 +4,14 @@ const authMiddleware = require('../middlewares/auth.middleware');
 const tenantMiddleware = require('../middlewares/tenant.middleware');
 const CandidateModel = require('../models/candidateModel');
 const adminService = require('../services/adminService');
+const ActivityLogService = require('../services/activityLogService');
 const questionSectionService = require('../services/questionSectionService');
 const db = require('../config/db');
 const config = require('../config');
 const axios = require('axios');
 const emailService = require('../services/emailService');
+const whatsappService = require('../services/whatsappService');
+const { getDb, COLLECTIONS } = require('../config/mongo');
 
 const assessmentSummaryDb = () => (config.database && config.database.name) || process.env.DB_NAME || 'candidates_db';
 
@@ -137,7 +140,57 @@ router.post('/add', authMiddleware, tenantMiddleware, async (req, res) => {
         `;
         await db.query(updateCreditsQuery, [creditsId]);
 
+        // Create notifications for the specific candidate
+        try {
+            const mongoDb = await getDb();
+            const positionTitle = req.body.positionTitle || 'Assessment';
+            
+            // 1. Test Assigned Notification
+            await mongoDb.collection(COLLECTIONS.NOTIFICATIONS).insertOne({
+                candidateId,
+                message: `You have been assigned to the assessment for: "${positionTitle}". Check your email for details.`,
+                type: 'test_assigned',
+                createdAt: new Date(),
+                dismissed: false
+            });
+
+            // 2. Credit Utilized Notification (Interview Credit)
+            await mongoDb.collection(COLLECTIONS.NOTIFICATIONS).insertOne({
+                candidateId,
+                message: `1 Interview Credit has been utilized for your: "${positionTitle}" assessment.`,
+                type: 'credit_utilization',
+                createdAt: new Date(),
+                dismissed: false
+            });
+        } catch (mongoErr) {
+            console.warn('[PositionCandidates] Failed to create MongoDB notifications:', mongoErr.message);
+        }
+
         const responseData = { ...result, recommendationStatus: 'PENDING' };
+        
+        // Log activity
+        try {
+            await ActivityLogService.logActivity(tenantDb, {
+                organizationId: orgId,
+                actorId: scheduledBy,
+                actorName: req.body.actorName || req.user?.fullName || req.user?.name || 'Admin',
+                actorRole: 'Admin',
+                activityType: 'INTERVIEW_SCHEDULED',
+                activityTitle: 'Interview Scheduled',
+                activityDescription: `Interview scheduled for candidate ID ${candidateId}`,
+                entityId: candidateId,
+                entityType: 'CANDIDATE',
+                metadata: {
+                    positionId,
+                    candidateId,
+                    questionSetId,
+                    positionName: req.body.positionTitle || 'Position'
+                }
+            });
+        } catch (logErr) {
+            console.warn('[PositionCandidates] Activity logging failed:', logErr.message);
+        }
+
         return res.status(201).json({
             success: true,
             message: 'Position candidate created successfully',
@@ -320,6 +373,31 @@ async function handleScoreResume(req, res) {
       }
     }
 
+    // Log status change activity
+    try {
+        await ActivityLogService.logActivity(req.tenantDb, {
+            organizationId,
+            actorId: req.user?.id || 'SYSTEM',
+            actorName: req.body.actorName || req.user?.fullName || req.user?.name || 'System',
+            actorRole: 'Admin',
+            activityType: 'STATUS_CHANGED',
+            activityTitle: 'Candidate Status Updated',
+            activityDescription: `Status updated to ${recommendationStatus} after resume scoring`,
+            entityId: candidateId,
+            entityType: 'CANDIDATE',
+            metadata: {
+                positionId,
+                candidateId,
+                score: overallScore,
+                oldStatus: 'INVITED',
+                newStatus: recommendationStatus,
+                positionName: req.body.positionName || 'Position'
+            }
+        });
+    } catch (logErr) {
+        console.warn('[PositionCandidates] Activity logging failed:', logErr.message);
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Resume score calculated and saved',
@@ -490,6 +568,29 @@ router.post('/manual-invite', authMiddleware, tenantMiddleware, async (req, res)
       await CandidateModel.createAssessmentSummary(summaryPayload, summaryDb);
     }
 
+    // Log manual invite activity
+    try {
+        await ActivityLogService.logActivity(req.tenantDb, {
+            organizationId: orgId,
+            actorId: req.user?.id || 'SYSTEM',
+            actorName: req.user?.fullName || req.user?.name || 'System',
+            actorRole: 'Admin',
+            activityType: 'STATUS_CHANGED',
+            activityTitle: 'Candidate Manually Invited',
+            activityDescription: `Status updated to MANUALLY_INVITED for candidate ID ${linkDetails.candidateId}`,
+            entityId: linkDetails.candidateId,
+            entityType: 'CANDIDATE',
+            metadata: {
+                positionId: linkDetails.positionId,
+                candidateId: linkDetails.candidateId,
+                newStatus: 'MANUALLY_INVITED',
+                positionName: linkDetails.positionName || 'Position'
+            }
+        });
+    } catch (logErr) {
+        console.warn('[PositionCandidates] manual-invite activity logging failed:', logErr.message);
+    }
+
     // Send invite email with verification code and correct position name
     try {
       const testPortalUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_TEST_PORTAL_URL || process.env.CANDIDATE_LINK_BASE_URL || '').trim() || 'your test portal';
@@ -498,11 +599,87 @@ router.post('/manual-invite', authMiddleware, tenantMiddleware, async (req, res)
       const inviteSubject = `You have been manually invited to take the assessment – ${positionDisplayName}`;
       const inviteBody = `<p>Hi ${candidateDisplayName},</p><p>You have been selected to take an assessment for the position: <strong>${positionDisplayName}</strong> at <strong>${resolvedCompanyName}</strong>.</p><p>Your verification code is: <strong>${verificationCode}</strong></p><p>Take your test at: <a href="${testPortalUrl}">${testPortalUrl}</a></p><p>Enter your registered email and this verification code to start the assessment.</p><p>The link is valid for 7 days.</p><p>Best regards,<br/>${resolvedCompanyName} Recruitment Team</p>`;
       const emailResult = await emailService.sendEmail(candidateEmail, inviteSubject, inviteBody);
+      
+      // Log single email activity
+      try {
+        await ActivityLogService.logActivity(req.tenantDb, {
+            organizationId: orgId,
+            actorId: req.user?.id || 'SYSTEM',
+            actorName: req.user?.fullName || req.user?.name || 'System',
+            actorRole: 'Admin',
+            activityType: 'SINGLE_EMAIL',
+            activityTitle: `Manual Invitation sent to ${candidateDisplayName}`,
+            activityDescription: `Manual assessment invitation for position: ${positionDisplayName}`,
+            entityId: linkDetails.candidateId,
+            entityType: 'CANDIDATE',
+            metadata: {
+                recipient: candidateEmail,
+                subject: inviteSubject,
+                status: emailResult.sent ? 'SENT' : 'FAILED',
+                error: emailResult.error || null,
+                positionName: positionDisplayName
+            }
+        });
+      } catch (logErr) {
+        console.warn('[PositionCandidates] manual-invite single email activity logging failed:', logErr.message);
+      }
+
       if (!emailResult.sent) {
         console.warn('[manual-invite] Email not sent:', emailResult.error);
       }
     } catch (emailErr) {
       console.warn('[manual-invite] Email send error (non-fatal):', emailErr.message);
+    }
+
+    // Send WhatsApp invite if mobile number is available
+    if (candidate?.mobile_number || candidate?.mobileNumber) {
+        try {
+            const mobileNumber = candidate?.mobile_number || candidate?.mobileNumber;
+            const testPortalUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_TEST_PORTAL_URL || process.env.CANDIDATE_LINK_BASE_URL || '').trim() || 'your test portal';
+            const candidateDisplayName = linkDetails.candidateName || candidate?.candidate_name || 'Candidate';
+            const positionDisplayName = linkDetails.positionName || 'the position';
+            
+            const waBodyValues = [
+                candidateDisplayName,
+                positionDisplayName,
+                resolvedCompanyName,
+                testPortalUrl,
+                verificationCode
+            ];
+            
+            const waResult = await whatsappService.sendWhatsAppMessage(mobileNumber, waBodyValues);
+            
+            // Log WhatsApp activity
+            try {
+                await ActivityLogService.logActivity(req.tenantDb, {
+                    organizationId: orgId,
+                    actorId: req.user?.id || 'SYSTEM',
+                    actorName: req.user?.fullName || req.user?.name || 'System',
+                    actorRole: 'Admin',
+                    activityType: 'WHATSAPP_MESSAGE',
+                    activityTitle: `Manual WhatsApp Invitation sent to ${candidateDisplayName}`,
+                    activityDescription: `Manual assessment invitation WhatsApp for position: ${positionDisplayName}`,
+                    entityId: linkDetails.candidateId,
+                    entityType: 'CANDIDATE',
+                    metadata: {
+                        recipient: mobileNumber,
+                        status: waResult.sent ? 'SENT' : 'FAILED',
+                        error: waResult.error || null,
+                        positionName: positionDisplayName,
+                        positionId: linkDetails.positionId,
+                        candidateId: linkDetails.candidateId
+                    }
+                });
+            } catch (logErr) {
+                console.warn('[PositionCandidates] manual-invite WhatsApp activity logging failed:', logErr.message);
+            }
+
+            if (!waResult.sent) {
+                console.warn('[manual-invite] WhatsApp not sent:', waResult.error);
+            }
+        } catch (waErr) {
+            console.warn('[manual-invite] WhatsApp send error (non-fatal):', waErr.message);
+        }
     }
 
     return res.status(200).json({

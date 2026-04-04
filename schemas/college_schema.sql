@@ -302,3 +302,193 @@ CREATE TABLE IF NOT EXISTS resume_extract (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_resume_extract_candidate_position (candidate_id, position_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+-- Academic Schema Additions
+
+-- Departments
+CREATE TABLE IF NOT EXISTS college_departments (
+    id VARCHAR(36) PRIMARY KEY,
+    organization_id VARCHAR(36) NOT NULL,
+    created_by VARCHAR(36) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    code VARCHAR(50),
+    description TEXT,
+    mentor_id VARCHAR(36),
+    status ENUM('Active', 'Inactive') DEFAULT 'Active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Branches
+CREATE TABLE IF NOT EXISTS college_branches (
+    id VARCHAR(36) PRIMARY KEY,
+    department_id VARCHAR(36) NOT NULL,
+    created_by VARCHAR(36) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    code VARCHAR(50),
+    description TEXT,
+    branch_head_id VARCHAR(36),
+    status ENUM('Active', 'Inactive') DEFAULT 'Active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    start_year INT,
+    end_year INT,
+    FOREIGN KEY (department_id) REFERENCES college_departments(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Subjects
+CREATE TABLE IF NOT EXISTS college_subjects (
+    id VARCHAR(36) PRIMARY KEY,
+    branch_id VARCHAR(36) NOT NULL,
+    created_by VARCHAR(36) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    code VARCHAR(50),
+    description TEXT,
+    teacher_id VARCHAR(36),
+    semester INT,
+    status ENUM('Active', 'Inactive') DEFAULT 'Active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (branch_id) REFERENCES college_branches(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- College Candidates (Relational mapping in tenant DB)
+CREATE TABLE IF NOT EXISTS college_candidates (
+    candidate_id VARCHAR(36) PRIMARY KEY,
+    organization_id VARCHAR(36) NOT NULL,
+    candidate_code VARCHAR(50),
+    register_no VARCHAR(50),
+    candidate_name VARCHAR(255),
+    department VARCHAR(255),
+    semester INT,
+    year_of_passing INT,
+    email VARCHAR(255) NOT NULL,
+    mobile_number VARCHAR(20),
+    location VARCHAR(255),
+    address TEXT,
+    birthdate DATE,
+    resume_filename VARCHAR(255),
+    resume_url TEXT,
+    interview_notes TEXT,
+    internal_notes TEXT,
+    notes_by VARCHAR(255),
+    notes_date DATE,
+    status VARCHAR(50) DEFAULT 'active',
+    skills TEXT,
+    candidate_created_by VARCHAR(36),
+    candidate_created_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    current_role VARCHAR(255) DEFAULT 'Software Developer',
+    academic_year VARCHAR(100) DEFAULT 'Final Year',
+    registration_paid TINYINT(1) DEFAULT 0,
+    plan_id VARCHAR(36),
+    subscription_expiry DATETIME,
+    dept_id VARCHAR(36),
+    branch_id VARCHAR(36),
+    department_name VARCHAR(255),
+    UNIQUE KEY uk_email_org (email, organization_id),
+    UNIQUE KEY uk_candidate_code (candidate_code),
+    UNIQUE KEY uk_register_no (register_no),
+    FOREIGN KEY (dept_id) REFERENCES college_departments(id) ON DELETE SET NULL,
+    FOREIGN KEY (branch_id) REFERENCES college_branches(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Attendance Records
+CREATE TABLE IF NOT EXISTS college_attendance (
+    id CHAR(36) PRIMARY KEY,
+    organization_id VARCHAR(36),
+    student_id VARCHAR(36) NOT NULL,
+    subject_id VARCHAR(36) NOT NULL,
+    date DATE NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'Present',
+    type VARCHAR(50) DEFAULT 'Lecture',
+    remarks VARCHAR(255),
+    created_by VARCHAR(36),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_student_date (student_id, date),
+    FOREIGN KEY (student_id) REFERENCES college_candidates(candidate_id) ON DELETE CASCADE,
+    FOREIGN KEY (subject_id) REFERENCES college_subjects(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Tasks
+CREATE TABLE IF NOT EXISTS tasks (
+    id CHAR(36) PRIMARY KEY,
+    task_code VARCHAR(20) UNIQUE,
+    title VARCHAR(255) NOT NULL,
+    short_description VARCHAR(512),
+    description TEXT,
+    notes TEXT,
+    links JSON,
+    end_date DATETIME,
+    priority ENUM('Low', 'Medium', 'High') DEFAULT 'Medium',
+    dept_id CHAR(36),
+    branch_id CHAR(36),
+    organization_id CHAR(36),
+    created_by VARCHAR(36),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_task_org (organization_id),
+    INDEX idx_task_code (task_code),
+    FOREIGN KEY (dept_id) REFERENCES college_departments(id) ON DELETE SET NULL,
+    FOREIGN KEY (branch_id) REFERENCES college_branches(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Task Attachments
+CREATE TABLE IF NOT EXISTS task_attachments (
+    id CHAR(36) PRIMARY KEY,
+    task_id CHAR(36) NOT NULL,
+    filename VARCHAR(255) NOT NULL,
+    file_url TEXT NOT NULL,
+    file_type VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Student Tasks (Mapping & Tracking)
+CREATE TABLE IF NOT EXISTS student_tasks (
+    id CHAR(36) PRIMARY KEY,
+    student_id VARCHAR(36) NOT NULL,
+    task_id CHAR(36) NOT NULL,
+    status ENUM('Pending', 'In Progress', 'Completed', 'Reviewed') DEFAULT 'Pending',
+    candidate_message TEXT,
+    completed_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    INDEX idx_student_task (student_id, task_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Assessments Summary
+CREATE TABLE IF NOT EXISTS assessments_summary (
+    id BINARY(16) PRIMARY KEY,
+    candidate_id BINARY(16) NOT NULL,
+    position_id BINARY(16) NOT NULL,
+    question_id BINARY(16) NOT NULL,
+    total_rounds_assigned INT DEFAULT 0,
+    total_rounds_completed INT DEFAULT 0,
+    total_interview_time VARCHAR(255),
+    assessment_start_time VARCHAR(255),
+    assessment_end_time VARCHAR(255),
+    is_assessment_completed BIT(1),
+    is_report_generated BIT(1),
+    round1_assigned BIT(1),
+    round1_completed BIT(1),
+    round1_start_time VARCHAR(255),
+    round1_end_time VARCHAR(255),
+    round1_time_taken VARCHAR(255),
+    round1_given_time VARCHAR(20),
+    round2_assigned BIT(1),
+    round2_completed BIT(1),
+    round2_start_time VARCHAR(255),
+    round2_end_time VARCHAR(255),
+    round2_time_taken VARCHAR(255),
+    round2_given_time VARCHAR(20),
+    round3_assigned BIT(1),
+    round3_completed BIT(1),
+    round3_start_time VARCHAR(255),
+    round3_end_time VARCHAR(255),
+    round3_time_taken VARCHAR(255)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

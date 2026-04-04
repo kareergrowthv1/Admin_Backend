@@ -1,0 +1,8 @@
+[CandidateModel] getAllCandidates: db=sharan_m_mmhgw1ga, q=SELECT * FROM sharan_m_mmhgw1ga.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["c55aed1d-8dfc-4896-9c04-450a39f404b5",10,0]
+[CandidateModel] Found 10 rows, total=101
+[CandidateModel] getAllCandidates: db=sharan_m_mmhgw1ga, q=SELECT * FROM sharan_m_mmhgw1ga.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["c55aed1d-8dfc-4896-9c04-450a39f404b5",10,0]
+[CandidateModel] Found 10 rows, total=101
+[CandidateModel] getAllCandidates: db=sharan_m_mmhgw1ga, q=SELECT * FROM sharan_m_mmhgw1ga.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["c55aed1d-8dfc-4896-9c04-450a39f404b5",10,0]
+[CandidateModel] Found 10 rows, total=101
+[CandidateModel] getAllCandidates: db=sharan_m_mmhgw1ga, q=SELECT * FROM sharan_m_mmhgw1ga.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["c55aed1d-8dfc-4896-9c04-450a39f404b5",10,0]
+[CandidateModel] Found 10 rows, total=101
