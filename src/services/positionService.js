@@ -130,7 +130,8 @@ const createPosition = async (tenantDb, positionData) => {
         applicationDeadline,
         company_name,
         createdBy,
-        userId
+        userId,
+        jobDescriptionText
     } = positionData;
 
     let resolvedTenantDb = tenantDb;
@@ -223,8 +224,9 @@ const createPosition = async (tenantDb, positionData) => {
                 minimum_experience,
                 maximum_experience,
                 no_of_positions,
-                job_description_document_path,
+                job_description_document_path, 
                 job_description_document_file_name,
+                job_description,
                 position_status,
                 expected_start_date,
                 application_deadline,
@@ -232,7 +234,7 @@ const createPosition = async (tenantDb, positionData) => {
                 created_by,
                 created_at,
                 updated_at
-            ) VALUES (UNHEX(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            ) VALUES (UNHEX(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
         `;
 
         const positionIdClean = positionId.replace(/-/g, '');
@@ -251,6 +253,7 @@ const createPosition = async (tenantDb, positionData) => {
                     noOfPositions,
                     jobDescriptionPath || null,
                     jobDescriptionFileName || null,
+                    jobDescriptionText || null,
                     'ACTIVE', // Default status to ACTIVE
                     toNormalizedDate(expectedStartDate),
                     toNormalizedDate(applicationDeadline),
@@ -418,8 +421,8 @@ const getPositions = async (tenantDb, filters = {}) => {
                 p.code,
                 ${useJobs ? 'p.job_title' : 'p.title'} as title,
                 ${useJobs ? 'p.job_type' : 'p.domain_type'} as domainType,
-                p.experience_min as minimumExperience,
-                p.experience_max as maximumExperience,
+                ${useJobs ? 'p.experience_min' : 'p.minimum_experience'} as minimumExperience,
+                ${useJobs ? 'p.experience_max' : 'p.maximum_experience'} as maximumExperience,
                 ${useJobs ? 'p.job_description_document_path' : 'p.job_description_document_path'} as jobDescriptionDocumentPath,
                 ${useJobs ? 'p.job_description_document_file_name' : 'p.job_description_document_file_name'} as jobDescriptionDocumentFileName,
                 p.no_of_positions as noOfPositions,
@@ -601,6 +604,7 @@ const getPositionById = async (tenantDb, positionId, userId) => {
                 ${useJobs ? 'NULL' : 'p.company_name'} as companyName,
                 p.job_description_document_path as jobDescriptionDocumentPath,
                 p.job_description_document_file_name as jobDescriptionDocumentFileName,
+                p.job_description as jobDescriptionText,
                 p.internal_notes as internalNotes,
                 p.created_by as createdBy,
                 p.created_at as createdAt,
@@ -785,7 +789,8 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
             applicationDeadline,
             internalNotes,
             jobDescriptionDocumentPath,
-            jobDescriptionDocumentFileName
+            jobDescriptionDocumentFileName,
+            jobDescriptionText
         } = updateData;
 
         // Build dynamic update query
@@ -831,6 +836,10 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
         if (jobDescriptionDocumentFileName !== undefined) {
             updateFields.push('job_description_document_file_name = ?');
             params.push(jobDescriptionDocumentFileName);
+        }
+        if (jobDescriptionText !== undefined) {
+            updateFields.push('job_description = ?');
+            params.push(jobDescriptionText);
         }
 
         const positionIdHex = toPositionIdHex(positionId);
@@ -1047,16 +1056,17 @@ const getFilterMetadata = async (tenantDb, userId, dataFilter = {}) => {
  * Update only job description path and filename on a position (no file storage).
  * Used after client uploads JD and calls PUT with the path.
  */
-const updatePositionPathOnly = async (tenantDb, positionId, relativePath, fileName) => {
+const updatePositionPathOnly = async (tenantDb, positionId, relativePath, fileName, jdText) => {
     const positionIdHex = toPositionIdHex(positionId);
     const updateQuery = `
         UPDATE \`${tenantDb}\`.positions
         SET job_description_document_path = ?,
             job_description_document_file_name = ?,
+            job_description = COALESCE(?, job_description),
             updated_at = NOW()
         WHERE HEX(id) = ?
     `;
-    await db.query(updateQuery, [relativePath, fileName || 'document.pdf', positionIdHex]);
+    await db.query(updateQuery, [relativePath, fileName || 'document.pdf', jdText || null, positionIdHex]);
 };
 
 /**

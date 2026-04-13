@@ -14,7 +14,10 @@ exports.getDashboardStats = async (req, res, next) => {
             actorId: req.user?.dataFilter?.createdBy || null
         };
 
-        const stats = await DashboardService.getStats(req.tenantDb, organizationId, filters);
+        const stats = await DashboardService.getStats(req.tenantDb, organizationId, {
+            ...filters,
+            isCollege: req.user?.isCollege ?? (req.query.isCollege === 'true')
+        });
         res.status(200).json({ success: true, data: stats });
     } catch (error) {
         next(error);

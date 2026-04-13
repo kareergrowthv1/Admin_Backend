@@ -109,7 +109,8 @@ exports.updateRolePermissions = async (req, res, next) => {
     try {
         const { roleId } = req.params;
         const { permissions, name, description, status } = req.body;
-        await rbacService.updateRolePermissions(roleId, permissions, { name, description, status });
+        const updaterId = req.user?.id;
+        await rbacService.updateRolePermissions(roleId, permissions, { name, description, status }, updaterId);
         res.status(200).json({ success: true, message: 'Role and permissions updated successfully' });
     } catch (error) {
         next(error);

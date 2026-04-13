@@ -80,28 +80,55 @@ class RBACService {
         let tasksSubquery = '0';
 
         if (tenantDb) {
-            const tableCheck = await db.query(
-                `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
-                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('jobs', 'positions', 'job_candidates', 'candidate_positions', 'position_candidates')`,
-                [tenantDb]
-            );
-            const existingTables = (tableCheck || []).map(t => t.TABLE_NAME);
+            try {
+                const tableCheck = await db.query(
+                    `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
+                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('jobs', 'positions', 'job_candidates', 'candidate_positions', 'position_candidates', 'tasks')`,
+                    [tenantDb]
+                );
+                const existingTables = (tableCheck || []).map(t => t.TABLE_NAME);
 
-            const positionsTable = existingTables.includes('jobs') ? 'jobs' : 'positions';
-            const candidateTable = existingTables.includes('job_candidates') ? 'job_candidates' : 
-                                   (existingTables.includes('candidate_positions') ? 'candidate_positions' : 'position_candidates');
+                const positionsTable = existingTables.includes('jobs') ? 'jobs' : (existingTables.includes('positions') ? 'positions' : null);
+                const candidateTable = existingTables.includes('job_candidates') ? 'job_candidates' :
+                                       (existingTables.includes('candidate_positions') ? 'candidate_positions' :
+                                       (existingTables.includes('position_candidates') ? 'position_candidates' : null));
 
-            positionsSubquery = `(SELECT COUNT(*) FROM \`${tenantDb}\`.\`${positionsTable}\` p WHERE p.created_by = u.id)`;
-            // Candidates: Applicants/Invitations
-            candidatesSubquery = `(SELECT COUNT(*) FROM \`${tenantDb}\`.\`${candidateTable}\` pc WHERE pc.created_by = u.id)`;
+                if (positionsTable) {
+                    positionsSubquery = `(SELECT COUNT(*) FROM \`${tenantDb}\`.\`${positionsTable}\` p WHERE p.created_by = u.id)`;
+                }
+                if (candidateTable) {
+                    // Only use created_by if it exists on the candidate table
+                    try {
+                        const colCheck = await db.query(
+                            `SELECT COUNT(*) as cnt FROM INFORMATION_SCHEMA.COLUMNS 
+                             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = 'created_by'`,
+                            [tenantDb, candidateTable]
+                        );
+                        if (colCheck[0]?.cnt > 0) {
+                            candidatesSubquery = `(SELECT COUNT(*) FROM \`${tenantDb}\`.\`${candidateTable}\` pc WHERE pc.created_by = u.id)`;
+                        }
+                    } catch (colErr) {
+                        console.warn('[rbacService] Column check failed:', colErr.message);
+                    }
+                }
+                if (existingTables.includes('tasks')) {
+                    tasksSubquery = `(SELECT COUNT(*) FROM \`${tenantDb}\`.tasks t WHERE t.created_by = u.id)`;
+                }
 
-            // Students: Registered students (college_candidates)
-            // Fallback: Attribute students with NULL creator to the Main Administrator (ROLE0003)
-            studentsSubquery = `(SELECT COUNT(*) FROM candidates_db.college_candidates cc 
-                                 WHERE (cc.candidate_created_by = u.id OR (cc.candidate_created_by IS NULL AND r.code = 'ROLE0003'))
-                                 AND cc.organization_id = u.organization_id)`;
-            // Tasks: Assignments/Work
-            tasksSubquery = `(SELECT COUNT(*) FROM \`${tenantDb}\`.tasks t WHERE t.created_by = u.id)`;
+                // Students subquery: only for college orgs
+                if (isCollege) {
+                    const ccCheck = await db.query(
+                        `SELECT COUNT(*) as cnt FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'candidates_db' AND TABLE_NAME = 'college_candidates'`
+                    );
+                    if (ccCheck[0]?.cnt > 0) {
+                        studentsSubquery = `(SELECT COUNT(*) FROM candidates_db.college_candidates cc 
+                                             WHERE (cc.candidate_created_by = u.id OR (cc.candidate_created_by IS NULL AND r.code = 'ROLE0003'))
+                                             AND cc.organization_id = u.organization_id)`;
+                    }
+                }
+            } catch (subqueryErr) {
+                console.warn('[rbacService] Subquery build failed, using defaults:', subqueryErr.message);
+            }
         }
 
         let query = `SELECT u.id, u.email, u.username, u.first_name, u.last_name, u.phone_number, 
@@ -158,7 +185,7 @@ class RBACService {
         for (const [key, value] of Object.entries(userData)) {
             if (value !== undefined) {
                 // Map camelCase to snake_case if necessary, or just use the keys directly if they match DB
-                const dbKey = key === 'firstName' ? 'first_name' : (key === 'lastName' ? 'last_name' : (key === 'isActive' ? 'is_active' : key));
+                const dbKey = key === 'firstName' ? 'first_name' : (key === 'lastName' ? 'last_name' : (key === 'isActive' ? 'is_active' : (key === 'phoneNumber' ? 'phone_number' : key)));
                 updates.push(`${dbKey} = ?`);
                 params.push(value);
             }
@@ -198,12 +225,14 @@ class RBACService {
             dashboard_options: row.dashboard_options ? JSON.parse(JSON.stringify(row.dashboard_options)) : null,
             permissions: {
                 read: (row.permissions & 1) !== 0,
-                write: (row.permissions & 2) !== 0,
+                create: (row.permissions & 2) !== 0,
                 update: (row.permissions & 4) !== 0,
                 delete: (row.permissions & 8) !== 0,
                 export: (row.permissions & 16) !== 0,
                 import: (row.permissions & 32) !== 0,
-                show: (row.permissions & 64) !== 0 // Bit 64 as used in RoleEditor.jsx
+                show: (row.permissions & 64) !== 0,
+                score: (row.permissions & 128) !== 0,
+                bulk: (row.permissions & 256) !== 0
             }
         }));
 
@@ -218,7 +247,7 @@ class RBACService {
         };
     }
 
-    async updateRolePermissions(roleId, permissions, metadata = {}) {
+    async updateRolePermissions(roleId, permissions, metadata = {}, updaterId = null) {
         // 1. Update Role Metadata if provided
         if (metadata.name || metadata.description || metadata.status) {
             const updates = [];
@@ -235,6 +264,10 @@ class RBACService {
             if (metadata.status) {
                 updates.push('is_active = ?');
                 params.push(metadata.status === 'Active' ? 1 : 0);
+            }
+            if (updaterId) {
+                updates.push('updated_by = ?');
+                params.push(updaterId);
             }
             
             if (updates.length > 0) {

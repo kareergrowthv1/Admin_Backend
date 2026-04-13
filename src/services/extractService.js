@@ -54,6 +54,13 @@ async function upsertJdExtract(tenantDb, positionId, orgId, extractedData) {
       `UPDATE \`${tenantDb}\`.jd_extract SET org_id = ?, extracted_data = ?, updated_at = NOW() WHERE position_id = ?`,
       [orgId, dataJson, positionId]
     );
+    // Also sync to positions table if text exists
+    if (extractedData.text) {
+      await db.query(
+        `UPDATE \`${tenantDb}\`.positions SET job_description = ?, updated_at = NOW() WHERE HEX(id) = ?`,
+        [extractedData.text, positionId.replace(/-/g, '')]
+      );
+    }
     return { id: existing[0].id, updated: true };
   }
   const id = uuidv4();
@@ -61,6 +68,13 @@ async function upsertJdExtract(tenantDb, positionId, orgId, extractedData) {
     `INSERT INTO \`${tenantDb}\`.jd_extract (id, position_id, org_id, extracted_data) VALUES (?, ?, ?, ?)`,
     [id, positionId, orgId, dataJson]
   );
+  // Also sync to positions table if text exists
+  if (extractedData.text) {
+    await db.query(
+      `UPDATE \`${tenantDb}\`.positions SET job_description = ?, updated_at = NOW() WHERE HEX(id) = ?`,
+      [extractedData.text, positionId.replace(/-/g, '')]
+    );
+  }
   return { id, updated: false };
 }
 

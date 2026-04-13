@@ -74,7 +74,7 @@ const createAdminWithDB = async (adminData) => {
 
     // Determine is_college flag based on role
     const roleRows = await db.authQuery('SELECT code FROM auth_db.roles WHERE id = ?', [roleId]);
-    const roleCode = roleRows[0]?.code;
+    const roleCode = (roleRows[0]?.code || '').toUpperCase();
     const isCollege = roleCode === 'ATS' ? 0 : 1;
 
     // 6. Hash password
@@ -165,7 +165,9 @@ const provisionAdminSchema = async (adminId) => {
 
     // 2. Determine which schema file to use based on role
     let schemaFilePath;
-    if (roleCode === 'ATS') {
+    const normalizedRole = (roleCode || '').toUpperCase();
+    
+    if (normalizedRole === 'ATS') {
         schemaFilePath = ATS_SCHEMA_SQL_PATH;
         console.log(`[AdminService] Using ATS schema (Jobs-based)`);
     } else {
@@ -256,154 +258,113 @@ const provisionAdminSchema = async (adminId) => {
 };
 
 const getCredits = async (tenantDb, organizationId, user) => {
-    console.log(`[AdminService.getCredits] Called with tenantDb=${tenantDb}, organizationId=${organizationId}, userClient=${user?.client}, userIsCollege=${user?.isCollege}`);
+    console.log(`[AdminService.getCredits] DEBUG: userId=${organizationId}, passedTenantDb=${tenantDb}, userClient=${user?.client}, userIsCollege=${user?.isCollege}`);
     if (!organizationId) return null;
 
-    let resolvedTenantDb = tenantDb;
+    let resolvedTenantDb = user?.client || tenantDb;
     let roleCode = null;
     let userExpiryInfo = { expiryDate: null };
 
-    // PRIMARY: Use authenticated user's client and role directly (most reliable)
-    if (user && (user.client || user.organizationId)) {
-        resolvedTenantDb = user.client || tenantDb;
-        // Determine role from user.isCollege flag (handle numeric/string formats)
-        const userIsCollege = (user.isCollege === true || user.isCollege === 1 || user.isCollege === '1');
-        roleCode = userIsCollege ? 'ADMIN' : 'ATS';
-        console.log(`[AdminService.getCredits] Using authenticated user - client=${resolvedTenantDb}, roleCode=${roleCode} (isCollege flag=${user.isCollege})`);
-        
-        // Fetch expiry date from auth_db
-        try {
-            const userRows = await db.authQuery(
-                `SELECT expiry_date, client FROM auth_db.users WHERE id = ? LIMIT 1`,
-                [organizationId] 
-            );
-            if (userRows[0]) {
-                userExpiryInfo = { expiryDate: userRows[0].expiry_date };
-                if (!resolvedTenantDb && userRows[0].client) resolvedTenantDb = userRows[0].client;
-            }
-        } catch (err) {
-            console.error(`[AdminService.getCredits] Expiry fetch error:`, err.message);
-        }
-    }
-    // FALLBACK: If no user object, try to lookup from auth_db
-    else if (!resolvedTenantDb || resolvedTenantDb === 'auth_db' || resolvedTenantDb === 'superadmin_db') {
-        console.log(`[AdminService.getCredits] No user object provided, attempting fallback lookup`);
-        // Query by user ID (the URL parameter is the logged-in user's unique ID)
+    // 1. Resolve Tenant DB and Role
+    if (!resolvedTenantDb || resolvedTenantDb === 'auth_db' || resolvedTenantDb === 'superadmin_db') {
+        console.log(`[AdminService.getCredits] Tenant not resolved from props, looking up in auth_db for userId=${organizationId}`);
         const userRows = await db.authQuery(
-            `SELECT u.client, r.code as role_code, u.id, u.organization_id, u.email, u.expiry_date
+            `SELECT u.client, r.code as role_code, u.expiry_date, u.is_college
              FROM auth_db.users u
              LEFT JOIN auth_db.roles r ON u.role_id = r.id
-             WHERE u.id = ? AND u.client IS NOT NULL AND u.is_admin = 1 LIMIT 1`,
+             WHERE u.id = ? AND u.is_active = 1 LIMIT 1`,
             [organizationId]
         );
-        console.log(`[AdminService.getCredits] Fallback lookup result (by user.id):`, userRows[0]);
-        if (userRows[0]?.client) {
+        
+        if (userRows[0]) {
             resolvedTenantDb = userRows[0].client;
             roleCode = userRows[0].role_code;
             userExpiryInfo = { expiryDate: userRows[0].expiry_date };
-        } else {
-            console.error(`[AdminService.getCredits] Fallback query found no matching admin for userId=${organizationId}`);
-            return null;
+            console.log(`[AdminService.getCredits] Resolved from fallback: client=${resolvedTenantDb}, role=${roleCode}`);
         }
+    } else {
+        // If already have resolvedTenantDb, still need roleCode for proper data structure
+        const userIsCollege = (user?.isCollege === true || user?.isCollege === 1 || user?.isCollege === '1');
+        roleCode = userIsCollege ? 'ADMIN' : 'ATS';
+        console.log(`[AdminService.getCredits] Using existing resolution: client=${resolvedTenantDb}, inferred role=${roleCode}`);
     }
 
     if (!resolvedTenantDb || resolvedTenantDb === 'auth_db' || resolvedTenantDb === 'superadmin_db') {
-        console.error(`[AdminService.getCredits] Could not resolve tenant schema for ${organizationId}`);
+        console.error(`[AdminService.getCredits] CRITICAL: Could not resolve tenant schema for userId=${organizationId}`);
         return null;
     }
 
-    const isCollege = (roleCode === 'ADMIN' || roleCode === 'ROLE0003');
-    console.log(`[AdminService.getCredits] Admin type - roleCode=${roleCode}, isCollege=${isCollege}`);
+    // 2. Query Tenant DB
+    try {
+        // Check screening columns
+        const columnCheck = await db.query(
+            `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'credits' AND COLUMN_NAME = 'total_screening_credits'`,
+            [resolvedTenantDb]
+        );
+        const hasScreeningColumns = columnCheck.length > 0;
 
-    console.log(`[AdminService.getCredits] Querying credits from: ${resolvedTenantDb}`);
+        // Query credits (Allowing is_active=0 as a fallback if no active records exist)
+        const sqlQuery = `SELECT 
+                total_interview_credits as totalInterviews,
+                utilized_interview_credits as utilizedInterviews,
+                total_position_credits as totalPositions,
+                utilized_position_credits as utilizedPositions,
+                ${hasScreeningColumns ? 'total_screening_credits' : '0'} as totalScreening,
+                ${hasScreeningColumns ? 'utilized_screening_credits' : '0'} as utilizedScreening,
+                valid_till as validTill,
+                is_active as isActive
+             FROM \`${resolvedTenantDb}\`.credits 
+             ORDER BY is_active DESC, created_at DESC LIMIT 1`;
 
-    // Check if screening columns exist (ATS) or not (College) using INFORMATION_SCHEMA
-    const columnCheck = await db.query(
-        `SELECT COLUMN_NAME 
-         FROM INFORMATION_SCHEMA.COLUMNS 
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'credits' AND COLUMN_NAME = 'total_screening_credits'`,
-        [resolvedTenantDb]
-    );
-    const hasScreeningColumns = columnCheck.length > 0;
-    console.log(`[AdminService.getCredits] Schema check: hasScreeningColumns=${hasScreeningColumns}`);
+        const rows = await db.query(sqlQuery, []);
+        console.log(`[AdminService.getCredits] Query executed on ${resolvedTenantDb}. Found ${rows.length} records.`);
 
-    // Build query based on detected schema columns
-    const sqlQuery = `SELECT 
-            total_interview_credits as totalInterviews,
-            utilized_interview_credits as utilizedInterviews,
-            total_position_credits as totalPositions,
-            utilized_position_credits as utilizedPositions,
-            ${hasScreeningColumns ? 'total_screening_credits' : '0'} as totalScreening,
-            ${hasScreeningColumns ? 'utilized_screening_credits' : '0'} as utilizedScreening,
-            valid_till as validTill,
-            is_active as isActive
-         FROM \`${resolvedTenantDb}\`.credits 
-         WHERE is_active = 1 
-         ORDER BY created_at DESC LIMIT 1`;
+        let credits = rows[0];
+        if (!credits) {
+            console.warn(`[AdminService.getCredits] No record found in credits table for ${resolvedTenantDb}. Returning default.`);
+            credits = {
+                totalInterviews: 0, utilizedInterviews: 0,
+                totalPositions: 0, utilizedPositions: 0,
+                totalScreening: 0, utilizedScreening: 0,
+                validTill: new Date(new Date().setFullYear(new Date().getFullYear() + 1)),
+                isActive: 1
+            };
+        }
 
-    const rows = await db.query(sqlQuery, []);
-
-    console.log(`[AdminService.getCredits] Query returned ${rows.length} rows:`, rows[0] || 'EMPTY');
-
-    let credits = rows[0];
-
-    if (!credits) {
-        console.warn(`[AdminService.getCredits] Missing credits record in ${resolvedTenantDb}. Returning default empty object to avoid dashboard collapse.`);
-        credits = {
-            totalInterviews: 0,
-            utilizedInterviews: 0,
-            totalPositions: 0,
-            utilizedPositions: 0,
-            totalScreening: 0,
-            utilizedScreening: 0,
-            validTill: new Date(new Date().setFullYear(new Date().getFullYear() + 1)),
-            isActive: 1
-        };
-    }
-
-    // For college admins, return only interview and position fields with remaining counts
-    if (isCollege) {
-        const totalInterviews = credits.totalInterviews || 0;
-        const utilizedInterviews = credits.utilizedInterviews || 0;
-        const totalPositions = credits.totalPositions || 0;
-        const utilizedPositions = credits.utilizedPositions || 0;
-
-        console.log(`[AdminService.getCredits] College admin detected - returning only interview & position credits`);
-        return {
-            totalInterviews,
-            utilizedInterviews,
-            remainingInterviews: totalInterviews - utilizedInterviews,
-            totalPositions,
-            utilizedPositions,
-            remainingPositions: totalPositions - utilizedPositions,
+        const isAts = (roleCode === 'ATS' || hasScreeningColumns);
+        
+        // Return structured data
+        const base = {
+            totalInterviews: credits.totalInterviews || 0,
+            utilizedInterviews: credits.utilizedInterviews || 0,
+            remainingInterviews: (credits.totalInterviews || 0) - (credits.utilizedInterviews || 0),
+            totalPositions: credits.totalPositions || 0,
+            utilizedPositions: credits.utilizedPositions || 0,
+            remainingPositions: (credits.totalPositions || 0) - (credits.utilizedPositions || 0),
             validTill: credits.validTill,
             expiryDate: userExpiryInfo.expiryDate,
             isActive: credits.isActive
         };
+
+        if (isAts) {
+            base.totalScreening = credits.totalScreening || 0;
+            base.utilizedScreening = credits.utilizedScreening || 0;
+            base.remainingScreening = (credits.totalScreening || 0) - (credits.utilizedScreening || 0);
+        }
+
+        console.log(`[AdminService.getCredits] Returning success for ${resolvedTenantDb}`);
+        return base;
+
+    } catch (err) {
+        console.error(`[AdminService.getCredits] Database error on ${resolvedTenantDb}:`, err.message);
+        // Fallback to empty object instead of null to prevent dashboard crash
+        return {
+            totalInterviews: 0, utilizedInterviews: 0, remainingInterviews: 0,
+            totalPositions: 0, utilizedPositions: 0, remainingPositions: 0,
+            isActive: 0, error: err.message
+        };
     }
-
-    // For ATS admins, return all fields including screening with remaining counts
-    const totalInterviews = credits.totalInterviews || 0;
-    const utilizedInterviews = credits.utilizedInterviews || 0;
-    const totalPositions = credits.totalPositions || 0;
-    const utilizedPositions = credits.utilizedPositions || 0;
-    const totalScreening = credits.totalScreening || 0;
-    const utilizedScreening = credits.utilizedScreening || 0;
-
-    return {
-        totalInterviews,
-        utilizedInterviews,
-        remainingInterviews: totalInterviews - utilizedInterviews,
-        totalPositions,
-        utilizedPositions,
-        remainingPositions: totalPositions - utilizedPositions,
-        totalScreening,
-        utilizedScreening,
-        remainingScreening: totalScreening - utilizedScreening,
-        validTill: credits.validTill,
-        expiryDate: userExpiryInfo.expiryDate,
-        isActive: credits.isActive
-    };
 };
 
 const getCreditHistory = async (tenantDb, organizationId) => {
@@ -553,8 +514,8 @@ const getCollegeDetails = async (tenantDb, organizationId) => {
                 website_url as websiteUrl, about_us as aboutUs,
                 created_at as createdAt, updated_at as updatedAt
          FROM \`${tenantDb}\`.college_details 
-         WHERE organization_id = ? OR organization_id = ? LIMIT 1`,
-        [orgIdBuffer, organizationId]
+         WHERE organization_id = ? OR HEX(organization_id) = ? LIMIT 1`,
+        [orgIdBuffer, organizationId.replace(/-/g, '').toUpperCase()]
     );
 
     if (rows.length === 0) return null;
@@ -623,8 +584,8 @@ const getCompanyDetails = async (tenantDb, organizationId) => {
                 facebook_url as facebookUrl, about_us as aboutUs,
                 created_at as createdAt, updated_at as updatedAt
          FROM \`${tenantDb}\`.company_details 
-         WHERE organization_id = ? OR organization_id = ? LIMIT 1`,
-        [orgIdBuffer, organizationId]
+         WHERE organization_id = ? OR HEX(organization_id) = ? LIMIT 1`,
+        [orgIdBuffer, organizationId.replace(/-/g, '').toUpperCase()]
     );
 
     if (rows.length === 0) return null;
@@ -899,11 +860,19 @@ const getOrganizationInfo = async (organizationId) => {
     // Smart Inference: if isCollege is null but we have a schema, check the schema
     if (isCollege === null && schemaName) {
         try {
-            const tableCheck = await db.query(
-                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND (TABLE_NAME = 'college_details' OR TABLE_NAME = 'COLLEGE_DETAILS') LIMIT 1",
+            const tables = await db.query(
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('college_details', 'company_details', 'COLLEGE_DETAILS', 'COMPANY_DETAILS')",
                 [schemaName]
             );
-            isCollege = tableCheck.length > 0;
+            const tableNames = (tables || []).map(t => t.TABLE_NAME.toLowerCase());
+            
+            if (tableNames.includes('college_details') && !tableNames.includes('company_details')) {
+                isCollege = true;
+            } else if (tableNames.includes('company_details')) {
+                isCollege = false;
+            } else if (tableNames.includes('college_details')) {
+                 isCollege = true;
+            }
             
             // Persist back to metadata for performance next time
             try {
@@ -931,6 +900,39 @@ const getOrganizationInfo = async (organizationId) => {
     };
 };
 
+const utilizeInterviewCredit = async (tenantDb, organizationId) => {
+    if (!tenantDb || !organizationId) throw new Error('Tenant DB and Organization ID are required');
+    await db.query(
+        `UPDATE \`${tenantDb}\`.credits 
+         SET utilized_interview_credits = utilized_interview_credits + 1,
+             updated_at = NOW()
+         WHERE is_active = 1 OR id IS NOT NULL 
+         ORDER BY is_active DESC, created_at DESC LIMIT 1`
+    );
+};
+
+const utilizeScreeningCredit = async (tenantDb, organizationId) => {
+    if (!tenantDb || !organizationId) throw new Error('Tenant DB and Organization ID are required');
+    await db.query(
+        `UPDATE \`${tenantDb}\`.credits 
+         SET utilized_screening_credits = utilized_screening_credits + 1,
+             updated_at = NOW()
+         WHERE is_active = 1 OR id IS NOT NULL 
+         ORDER BY is_active DESC, created_at DESC LIMIT 1`
+     );
+ };
+
+const utilizePositionCredit = async (tenantDb, organizationId) => {
+    if (!tenantDb || !organizationId) throw new Error('Tenant DB and Organization ID are required');
+    await db.query(
+        `UPDATE \`${tenantDb}\`.credits 
+         SET utilized_position_credits = utilized_position_credits + 1,
+             updated_at = NOW()
+         WHERE is_active = 1 OR id IS NOT NULL 
+         ORDER BY is_active DESC, created_at DESC LIMIT 1`
+    );
+};
+
 module.exports = {
     createAdminWithDB,
     provisionAdminSchema,
@@ -946,5 +948,8 @@ module.exports = {
     updateAiScoringSettings,
     getCrossQuestionSettings,
     updateCrossQuestionSettings,
-    getOrganizationInfo
+    getOrganizationInfo,
+    utilizeInterviewCredit,
+    utilizeScreeningCredit,
+    utilizePositionCredit
 };

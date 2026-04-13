@@ -48,7 +48,26 @@ const FALLBACK_TABLES = [
         INDEX idx_candidate_code (candidate_code),
         INDEX idx_created_by (candidate_created_by),
         UNIQUE KEY uk_email_org (email, organization_id)
-    )`
+    )`,
+    `CREATE TABLE IF NOT EXISTS candidate_ai_mock_rounds (
+        candidate_id VARCHAR(36) NOT NULL,
+        round_number INT NOT NULL,
+        status VARCHAR(20) NOT NULL,
+        score INT DEFAULT 0,
+        last_feedback TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (candidate_id, round_number)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS candidate_course_points (
+        candidate_id VARCHAR(36) NOT NULL,
+        course_id VARCHAR(36) NOT NULL,
+        module_progress JSON,
+        overall_percentage INT DEFAULT 0,
+        points INT DEFAULT 0,
+        metadata JSON,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (candidate_id, course_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 ];
 
 const initCandidatesDatabase = async () => {
@@ -80,7 +99,36 @@ const initCandidatesDatabase = async () => {
         for (const stmt of FALLBACK_TABLES) {
             await pool.query(stmt);
         }
-        console.log('[Startup] candidates_db created and tables ensured (college_candidates, etc.)');
+
+        // Incremental column migrations for college_candidates (ensures existing tables get new columns)
+        const addColumnIfMissing = async (table, column, definition) => {
+            const [cols] = await pool.query(
+                `SELECT COUNT(*) as cnt FROM INFORMATION_SCHEMA.COLUMNS 
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+                [CANDIDATES_DB, table, column]
+            );
+            if (cols[0].cnt === 0) {
+                console.log(`[Startup] Adding missing column ${column} to ${table}...`);
+                await pool.query(`ALTER TABLE \`${CANDIDATES_DB}\`.\`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+            }
+        };
+
+        await addColumnIfMissing('college_candidates', 'current_role', "VARCHAR(255) DEFAULT 'Software Developer'");
+        await addColumnIfMissing('college_candidates', 'academic_year', "VARCHAR(100) DEFAULT 'Final Year'");
+        await addColumnIfMissing('college_candidates', 'registration_paid', "TINYINT(1) DEFAULT 0");
+        await addColumnIfMissing('college_candidates', 'plan_id', "VARCHAR(36)");
+        await addColumnIfMissing('college_candidates', 'subscription_expiry', "DATETIME");
+        await addColumnIfMissing('college_candidates', 'dept_id', "VARCHAR(36)");
+        await addColumnIfMissing('college_candidates', 'branch_id', "VARCHAR(36)");
+        await addColumnIfMissing('college_candidates', 'department_name', "VARCHAR(255)");
+        await addColumnIfMissing('college_candidates', 'skills', "JSON"); // skills is used in CandidateBackend
+        await addColumnIfMissing('college_candidates', 'year_of_passing', "INT");
+        
+        // migrations for public_link
+        await addColumnIfMissing('public_link', 'tenant_id', "VARCHAR(255) AFTER question_set_id");
+        await addColumnIfMissing('public_link', 'question_section_id', "BINARY(16) AFTER question_set_id");
+
+        console.log('[Startup] candidates_db created and tables/columns ensured (college_candidates, etc.)');
     } finally {
         await pool.end();
     }
@@ -89,6 +137,9 @@ const initCandidatesDatabase = async () => {
 const startServer = async () => {
     await initCandidatesDatabase();
     await db.initializePool();
+
+    const AtsCandidateModel = require('./models/atsCandidateModel');
+    await AtsCandidateModel.ensureAtsCandidatesTable().catch(console.error);
 
     const fileStorageUtil = require('./utils/fileStorageUtil');
     await fileStorageUtil.initStorage();
@@ -105,6 +156,9 @@ const startServer = async () => {
         // Start scheduled tasks
         scheduler.startPositionExpiryJob();
         scheduler.startLinkExpiryJob();
+        
+        // Run once on startup to process any links that expired while server was down
+        scheduler.runLinkExpiryNow();
     });
 };
 

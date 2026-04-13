@@ -9,6 +9,7 @@ const questionSetController = require('../controllers/questionSetController');
 const questionSectionController = require('../controllers/questionSectionController');
 const interviewInstructionsController = require('../controllers/interviewInstructionsController');
 const candidateController = require('../controllers/candidateController');
+const atsCandidateController = require('../controllers/atsCandidateController');
 const ActivityLogService = require('../services/activityLogService');
 const authMiddleware = require('../middlewares/auth.middleware');
 const rbacMiddleware = require('../middlewares/rbac.middleware');
@@ -128,9 +129,11 @@ router.get('/positions/:positionId/candidates', authMiddleware, tenantMiddleware
 // Job routes (ATS only, handled by jobs table)
 router.post('/jobs', authMiddleware, tenantMiddleware, optionalJdOnCreate, rbacMiddleware('jobs'), jobController.createJob);
 router.get('/jobs', authMiddleware, tenantMiddleware, rbacMiddleware('jobs'), jobController.getJobs);
+router.get('/jobs/counts', authMiddleware, tenantMiddleware, rbacMiddleware('jobs'), jobController.getJobsCounts);
 router.get('/jobs/clients', authMiddleware, tenantMiddleware, rbacMiddleware('jobs'), jobController.getClients);
 router.get('/jobs/:jobId', authMiddleware, tenantMiddleware, rbacMiddleware('jobs'), jobController.getJobById);
 router.put('/jobs/:jobId/status', authMiddleware, tenantMiddleware, rbacMiddleware('jobs'), jobController.updateJobStatus);
+router.put('/jobs/:jobId/stages', authMiddleware, tenantMiddleware, rbacMiddleware('jobs'), jobController.updateJobStages);
 router.put('/jobs/:jobId/visibility', authMiddleware, tenantMiddleware, rbacMiddleware('jobs'), jobController.updateJobVisibility);
 router.post('/jobs/:jobId/job-description', authMiddleware, tenantMiddleware, uploadMemory.single('file'), jobController.uploadJobDescription);
 router.get('/jobs/:jobId/job-description', authMiddleware, tenantMiddleware, jobController.downloadJobDescription);
@@ -140,6 +143,20 @@ router.get('/clients', authMiddleware, tenantMiddleware, rbacMiddleware('clients
 router.post('/clients', authMiddleware, tenantMiddleware, rbacMiddleware('clients'), clientController.createClient);
 router.get('/clients/:clientId', authMiddleware, tenantMiddleware, rbacMiddleware('clients'), clientController.getClientById);
 router.put('/clients/:clientId', authMiddleware, tenantMiddleware, rbacMiddleware('clients'), clientController.updateClient);
+
+// ATS Candidates specifically
+router.get('/ats-candidates/status-counts', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.getStatusCounts);
+router.post('/ats-candidates', authMiddleware, tenantMiddleware, uploadMemory.single('resume'), rbacMiddleware('candidates'), atsCandidateController.addCandidate);
+router.get('/ats-candidates', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.getCandidates);
+router.get('/ats-candidates/:candidateId', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.getCandidateById);
+router.get('/ats-applications/candidate/:candidateId', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.getApplicationByCandidateId);
+router.put('/ats-candidates/:candidateId/stage', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.updateCandidateStage);
+router.post('/ats-candidates/:candidateId/score-resume', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.scoreResume);
+router.delete('/ats-candidates/:candidateId', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.deleteCandidate);
+router.post('/ats-candidates/:candidateId/resend-invitation', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.resendInvitation);
+router.post('/ats-candidates/:candidateId/setup-assessment', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.setupAssessment);
+router.get('/ats-job-stages', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.getJobStages);
+router.post('/ats-candidates/upload', authMiddleware, tenantMiddleware, uploadMemory.single('file'), atsCandidateController.uploadAndExtractResume);
 
 // Question Set routes
 router.post('/question-sets', authMiddleware, tenantMiddleware, rbacMiddleware('positions'), questionSetController.createQuestionSet);

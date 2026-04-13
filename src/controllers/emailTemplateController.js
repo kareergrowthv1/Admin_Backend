@@ -1,4 +1,5 @@
 const EmailTemplateModel = require('../models/emailTemplateModel');
+const AtsCandidateModel = require('../models/atsCandidateModel');
 
 exports.createTemplate = async (req, res, next) => {
     try {
@@ -23,6 +24,9 @@ exports.getAllTemplates = async (req, res, next) => {
         const tenantDb = req.tenantDb;
         if (!organizationId) return res.status(400).json({ success: false, message: 'Organization ID is required' });
         if (!tenantDb) return res.status(400).json({ success: false, message: 'Tenant DB is required' });
+
+        // Seed default templates if missing
+        await AtsCandidateModel.seedDefaultTemplates(tenantDb, organizationId);
 
         const templates = await EmailTemplateModel.getAllByOrg(tenantDb, organizationId);
         res.status(200).json({ success: true, data: templates });

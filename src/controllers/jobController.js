@@ -125,6 +125,22 @@ exports.getJobs = async (req, res, next) => {
 };
 
 /**
+ * Get jobs counts by status
+ * GET /admins/jobs/counts
+ */
+exports.getJobsCounts = async (req, res, next) => {
+    try {
+        const filters = {
+            createdBy: req.query.createdBy
+        };
+        const counts = await jobService.getJobsCounts(req.tenantDb, filters);
+        return res.status(200).json({ success: true, data: counts });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
  * Get job by ID
  * GET /admins/jobs/:jobId
  */
@@ -236,6 +252,24 @@ exports.updateJobVisibility = async (req, res, next) => {
         const { showToVendor } = req.body;
         await jobService.updateJobVisibility(req.tenantDb, jobId, showToVendor);
         return res.status(200).json({ success: true, message: 'Visibility updated successfully' });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * Update custom Kanban stages configuration for a job
+ * PUT /admins/jobs/:jobId/stages
+ */
+exports.updateJobStages = async (req, res, next) => {
+    try {
+        const { jobId } = req.params;
+        const { stages } = req.body;
+        if (!stages || !Array.isArray(stages)) {
+            return res.status(400).json({ success: false, message: 'valid stages array is required' });
+        }
+        await jobService.updateJobStages(req.tenantDb, jobId, stages);
+        return res.status(200).json({ success: true, message: 'Job stages updated successfully' });
     } catch (error) {
         next(error);
     }

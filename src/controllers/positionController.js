@@ -51,6 +51,7 @@ exports.createPosition = async (req, res, next) => {
             expectedStartDate,
             applicationDeadline,
             company_name,
+            jobDescriptionText,
             createdBy
         } = parsed;
 

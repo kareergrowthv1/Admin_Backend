@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS college_candidates (
     candidate_name VARCHAR(255) NOT NULL,
     department VARCHAR(255),
     semester INT,
+    year_of_passing INT,
     
     email VARCHAR(255) NOT NULL,
     mobile_number VARCHAR(20),
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS college_candidates (
     candidate_created_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    subjects TEXT,
     
     INDEX idx_organization_id (organization_id),
     INDEX idx_status (status),
@@ -86,6 +88,8 @@ CREATE TABLE IF NOT EXISTS public_link (
     client_id VARCHAR(255) NOT NULL,
     position_id BINARY(16) NOT NULL,
     question_set_id BINARY(16) NOT NULL,
+    question_section_id BINARY(16),
+    tenant_id VARCHAR(255),
     
     link VARCHAR(255),
     

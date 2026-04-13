@@ -10,12 +10,60 @@ router.use(authMiddleware);
 router.use(tenantMiddleware);
 
 /**
+ * Helper to generate sequential codes like DEPT001, BRAN001, etc.
+ */
+async function generateNextCode(tenantDb, table, prefix, organizationId) {
+    try {
+        let query = '';
+        let params = [];
+        
+        if (table === 'college_departments') {
+            query = `SELECT code FROM \`${tenantDb}\`.college_departments WHERE organization_id = ? AND code LIKE ? ORDER BY code DESC LIMIT 1`;
+            params = [organizationId, `${prefix}%`];
+        } else if (table === 'college_branches') {
+            query = `
+                SELECT b.code FROM \`${tenantDb}\`.college_branches b
+                JOIN \`${tenantDb}\`.college_departments d ON b.department_id = d.id
+                WHERE d.organization_id = ? AND b.code LIKE ? 
+                ORDER BY b.code DESC LIMIT 1
+            `;
+            params = [organizationId, `${prefix}%`];
+        } else if (table === 'college_subjects') {
+            query = `
+                SELECT s.code FROM \`${tenantDb}\`.college_subjects s
+                JOIN \`${tenantDb}\`.college_branches b ON s.branch_id = b.id
+                JOIN \`${tenantDb}\`.college_departments d ON b.department_id = d.id
+                WHERE d.organization_id = ? AND s.code LIKE ? 
+                ORDER BY s.code DESC LIMIT 1
+            `;
+            params = [organizationId, `${prefix}%`];
+        }
+
+        const rows = await db.query(query, params);
+        let nextNum = 1;
+        
+        if (rows.length > 0 && rows[0].code) {
+            const lastCode = rows[0].code;
+            const match = lastCode.match(/\d+$/);
+            if (match) {
+                nextNum = parseInt(match[0], 10) + 1;
+            }
+        }
+        
+        return `${prefix}${String(nextNum).padStart(3, '0')}`;
+    } catch (err) {
+        console.error(`[Attendance] Code generation failed for ${table}:`, err);
+        return `${prefix}${Date.now().toString().slice(-3)}`; // Fallback to avoid crash
+    }
+}
+
+/**
  * @route GET /attendance/departments
  * @desc Get all departments with summary stats
  */
     router.get('/departments', rbacMiddleware('departments'), async (req, res) => {
         const { dataScope, id: userId, organizationId: userOrgId } = req.user;
-        // Always use org ID from the authenticated token — never trust client-sent params for isolation
+        // Always use org ID from the authenticated token
         const organizationId = userOrgId;
         const { mentor_ids } = req.query;
 
@@ -23,24 +71,16 @@ router.use(tenantMiddleware);
             let query = `
                 SELECT 
                     d.id, d.name, d.code, d.organization_id, d.mentor_id, d.created_by, d.created_at, d.updated_at,
-                    -- Incharge (mentor) details
-                    u.first_name  AS mentor_first_name,
-                    u.last_name   AS mentor_last_name,
-                    u.email       AS mentor_email,
-                    u.mobile_no   AS mentor_phone,
-                    r.name        AS mentor_role,
-                    -- Creator details
-                    cu.first_name AS created_by_first_name,
-                    cu.last_name  AS created_by_last_name,
+                    u.first_name  AS mentor_first_name, u.last_name   AS mentor_last_name,
+                    u.email       AS mentor_email, u.phone_number AS mentor_phone,
+                    cu.first_name AS created_by_first_name, cu.last_name  AS created_by_last_name,
                     cu.email      AS created_by_email,
-                    -- Branch and student counts
                     (SELECT COUNT(*) FROM \`${req.tenantDb}\`.college_branches b WHERE b.department_id = d.id) AS branch_count,
                     (SELECT COUNT(*) FROM \`${req.tenantDb}\`.college_candidates c 
                      WHERE c.branch_id IN (SELECT id FROM \`${req.tenantDb}\`.college_branches b WHERE b.department_id = d.id)) AS student_count
                 FROM \`${req.tenantDb}\`.college_departments d 
                 LEFT JOIN auth_db.users u  ON d.mentor_id  = u.id
                 LEFT JOIN auth_db.users cu ON d.created_by = cu.id
-                LEFT JOIN auth_db.roles r  ON u.role_id    = r.id
                 WHERE d.organization_id = ?
             `;
             const params = [organizationId];
@@ -60,10 +100,82 @@ router.use(tenantMiddleware);
 
             query += ` ORDER BY d.created_at DESC`;
 
-        const rows = await db.query(query, params);
-        res.json({ success: true, data: rows });
+            const rows = await db.query(query, params);
+            res.json({ success: true, data: rows });
+        } catch (err) {
+            console.error('[Attendance] Get departments failed:', err);
+            res.status(500).json({ success: false, message: 'Internal server error' });
+        }
+    });
+
+/**
+ * @route POST /attendance/departments
+ * @desc Create new department
+ */
+router.post('/departments', rbacMiddleware('departments'), async (req, res) => {
+    const { name, code, description, mentor_id } = req.body;
+    const organizationId = req.user.organizationId;
+    const creatorId = req.user.id;
+
+    if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
+
+    try {
+        const id = uuidv4();
+        const autoCode = await generateNextCode(req.tenantDb, 'college_departments', 'DEPT', organizationId);
+        
+        await db.query(`
+            INSERT INTO \`${req.tenantDb}\`.college_departments (id, organization_id, created_by, name, code, description, mentor_id, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'Active')
+        `, [id, organizationId, creatorId, name, autoCode, description || null, mentor_id || null]);
+
+        res.status(201).json({ 
+            success: true, 
+            data: { 
+                id, 
+                organization_id: organizationId,
+                created_by: creatorId,
+                name, 
+                code: autoCode,
+                mentor_id: mentor_id || null,
+                created_at: new Date().toISOString()
+            } 
+        });
     } catch (err) {
-        console.error('[Attendance] Get departments failed:', err);
+        console.error('[Attendance] Create department failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route PUT /attendance/departments/:id
+ */
+router.put('/departments/:id', rbacMiddleware('departments'), async (req, res) => {
+    const { id } = req.params;
+    const { name, code, description, mentor_id, status } = req.body;
+
+    try {
+        await db.query(`
+            UPDATE \`${req.tenantDb}\`.college_departments 
+            SET name = ?, code = ?, description = ?, mentor_id = ?, status = ?
+            WHERE id = ?
+        `, [name, code, description, mentor_id, status || 'Active', id]);
+        res.json({ success: true, message: 'Department updated successfully' });
+    } catch (err) {
+        console.error('[Attendance] Update department failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route DELETE /attendance/departments/:id
+ */
+router.delete('/departments/:id', rbacMiddleware('departments'), async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.query(`DELETE FROM \`${req.tenantDb}\`.college_departments WHERE id = ?`, [id]);
+        res.json({ success: true, message: 'Department deleted successfully' });
+    } catch (err) {
+        console.error('[Attendance] Delete department failed:', err);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 });
@@ -71,10 +183,10 @@ router.use(tenantMiddleware);
 
 
 /**
- * @route GET /attendance/:deptId/branches
+ * @route GET /attendance/branches/:deptId
  * @desc Get all branches for a given department (Complete Access)
  */
-router.get('/:deptId/branches', rbacMiddleware('branches'), async (req, res) => {
+router.get('/branches/:deptId', rbacMiddleware('branches'), async (req, res) => {
     const { deptId } = req.params;
     const organizationId = req.user.organizationId || req.headers['x-user-orgid'];
     const { mentor_ids, batches } = req.query;
@@ -88,7 +200,7 @@ router.get('/:deptId/branches', rbacMiddleware('branches'), async (req, res) => 
                 u.first_name  AS mentor_first_name,
                 u.last_name   AS mentor_last_name,
                 u.email       AS mentor_email,
-                u.mobile_no   AS mentor_phone,
+                u.phone_number AS mentor_phone,
                 r.name        AS mentor_role,
                 -- Creator details
                 cu.first_name AS created_by_first_name,
@@ -132,10 +244,10 @@ router.get('/:deptId/branches', rbacMiddleware('branches'), async (req, res) => 
 });
 
 /**
- * @route GET /attendance/:deptId/branches/:userId
+ * @route GET /attendance/branches/:deptId/:userId
  * @desc Get branches scoped specifically to the provided user's ID within a department (Own Access)
  */
-router.get('/:deptId/branches/:userId', rbacMiddleware('branches'), async (req, res) => {
+router.get('/branches/:deptId/:userId', rbacMiddleware('branches'), async (req, res) => {
     const { deptId, userId } = req.params;
     const organizationId = req.user.organizationId || req.headers['x-user-orgid'];
     const { batches } = req.query;
@@ -149,7 +261,7 @@ router.get('/:deptId/branches/:userId', rbacMiddleware('branches'), async (req, 
                 u.first_name  AS mentor_first_name,
                 u.last_name   AS mentor_last_name,
                 u.email       AS mentor_email,
-                u.mobile_no   AS mentor_phone,
+                u.phone_number AS mentor_phone,
                 r.name        AS mentor_role,
                 -- Creator details
                 cu.first_name AS created_by_first_name,
@@ -184,10 +296,84 @@ router.get('/:deptId/branches/:userId', rbacMiddleware('branches'), async (req, 
 });
 
 /**
- * @route GET /attendance/:deptId/:branchId/subjects
+ * @route POST /attendance/branches
+ * @desc Create new branch
+ */
+router.post('/branches', rbacMiddleware('branches'), async (req, res) => {
+    const { name, code, description, department_id, branch_head_id, start_year, end_year } = req.body;
+    const creatorId = req.user.id;
+
+    if (!name || !department_id) {
+        return res.status(400).json({ success: false, message: 'Name and Department are required' });
+    }
+
+    try {
+        const id = uuidv4();
+        const organizationId = req.user.organizationId;
+        const autoCode = await generateNextCode(req.tenantDb, 'college_branches', 'BRAN', organizationId);
+
+        await db.query(`
+            INSERT INTO \`${req.tenantDb}\`.college_branches (id, department_id, created_by, name, code, description, branch_head_id, start_year, end_year, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
+        `, [id, department_id, creatorId, name, autoCode, description || null, branch_head_id || null, start_year || null, end_year || null]);
+
+        res.status(201).json({ 
+            success: true, 
+            data: { 
+                id, 
+                department_id,
+                created_by: creatorId,
+                name, 
+                code: autoCode,
+                branch_head_id: branch_head_id || null,
+                created_at: new Date().toISOString()
+            } 
+        });
+    } catch (err) {
+        console.error('[Attendance] Create branch failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route PUT /attendance/branches/:id
+ */
+router.put('/branches/:id', rbacMiddleware('branches'), async (req, res) => {
+    const { id } = req.params;
+    const { name, code, description, department_id, branch_head_id, start_year, end_year, status } = req.body;
+
+    try {
+        await db.query(`
+            UPDATE \`${req.tenantDb}\`.college_branches 
+            SET name = ?, code = ?, description = ?, department_id = ?, branch_head_id = ?, start_year = ?, end_year = ?, status = ?
+            WHERE id = ?
+        `, [name, code, description, department_id, branch_head_id, start_year, end_year, status || 'Active', id]);
+        res.json({ success: true, message: 'Branch updated successfully' });
+    } catch (err) {
+        console.error('[Attendance] Update branch failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route DELETE /attendance/branches/:id
+ */
+router.delete('/branches/:id', rbacMiddleware('branches'), async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.query(`DELETE FROM \`${req.tenantDb}\`.college_branches WHERE id = ?`, [id]);
+        res.json({ success: true, message: 'Branch deleted successfully' });
+    } catch (err) {
+        console.error('[Attendance] Delete branch failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route GET /attendance/subjects/:branchId
  * @desc Get all subjects for a branch (Complete Access)
  */
-router.get('/:deptId/:branchId/subjects', rbacMiddleware('subjects'), async (req, res) => {
+router.get('/subjects/:branchId', rbacMiddleware('subjects'), async (req, res) => {
     const { branchId } = req.params;
     const organizationId = req.user.organizationId || req.headers['x-user-orgid'];
     const { semester, teacher_ids } = req.query;
@@ -201,7 +387,7 @@ router.get('/:deptId/:branchId/subjects', rbacMiddleware('subjects'), async (req
                 u.first_name  AS teacher_first_name,
                 u.last_name   AS teacher_last_name,
                 u.email       AS teacher_email,
-                u.mobile_no   AS teacher_phone,
+                u.phone_number AS teacher_phone,
                 r.name        AS teacher_role,
                 -- Creator details
                 cu.first_name AS created_by_first_name,
@@ -245,10 +431,10 @@ router.get('/:deptId/:branchId/subjects', rbacMiddleware('subjects'), async (req
 });
 
 /**
- * @route GET /attendance/:deptId/:branchId/subjects/:userId
+ * @route GET /attendance/subjects/:branchId/:userId
  * @desc Get all subjects for a specific user within a branch (Own Access)
  */
-router.get('/:deptId/:branchId/subjects/:userId', rbacMiddleware('subjects'), async (req, res) => {
+router.get('/subjects/:branchId/:userId', rbacMiddleware('subjects'), async (req, res) => {
     const { branchId, userId } = req.params;
     const organizationId = req.user.organizationId || req.headers['x-user-orgid'];
     const { semester } = req.query;
@@ -262,7 +448,7 @@ router.get('/:deptId/:branchId/subjects/:userId', rbacMiddleware('subjects'), as
                 u.first_name  AS teacher_first_name,
                 u.last_name   AS teacher_last_name,
                 u.email       AS teacher_email,
-                u.mobile_no   AS teacher_phone,
+                u.phone_number AS teacher_phone,
                 r.name        AS teacher_role,
                 -- Creator details
                 cu.first_name AS created_by_first_name,
@@ -293,6 +479,81 @@ router.get('/:deptId/:branchId/subjects/:userId', rbacMiddleware('subjects'), as
         res.json({ success: true, data: rows });
     } catch (err) {
         console.error('[Attendance] Get scoped subjects failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route POST /attendance/subjects
+ * @desc Create new subject
+ */
+router.post('/subjects', rbacMiddleware('subjects'), async (req, res) => {
+    const { name, code, description, branch_id, teacher_id, semester } = req.body;
+    const creatorId = req.user.id;
+
+    if (!name || !branch_id) {
+        return res.status(400).json({ success: false, message: 'Name and Branch are required' });
+    }
+
+    try {
+        const id = uuidv4();
+        const organizationId = req.user.organizationId;
+        const autoCode = await generateNextCode(req.tenantDb, 'college_subjects', 'SUB', organizationId);
+
+        await db.query(`
+            INSERT INTO \`${req.tenantDb}\`.college_subjects (id, branch_id, created_by, name, code, description, teacher_id, semester, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Active')
+        `, [id, branch_id, creatorId, name, autoCode, description || null, teacher_id || null, semester || null]);
+
+        res.status(201).json({ 
+            success: true, 
+            data: { 
+                id, 
+                branch_id,
+                created_by: creatorId,
+                name, 
+                code: autoCode,
+                teacher_id: teacher_id || null,
+                semester: semester || null,
+                created_at: new Date().toISOString()
+            } 
+        });
+    } catch (err) {
+        console.error('[Attendance] Create subject failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route PUT /attendance/subjects/:id
+ */
+router.put('/subjects/:id', rbacMiddleware('subjects'), async (req, res) => {
+    const { id } = req.params;
+    const { name, code, description, branch_id, teacher_id, semester, status } = req.body;
+
+    try {
+        await db.query(`
+            UPDATE \`${req.tenantDb}\`.college_subjects 
+            SET name = ?, code = ?, description = ?, branch_id = ?, teacher_id = ?, semester = ?, status = ?
+            WHERE id = ?
+        `, [name, code, description, branch_id, teacher_id, semester, status || 'Active', id]);
+        res.json({ success: true, message: 'Subject updated successfully' });
+    } catch (err) {
+        console.error('[Attendance] Update subject failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route DELETE /attendance/subjects/:id
+ */
+router.delete('/subjects/:id', rbacMiddleware('subjects'), async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.query(`DELETE FROM \`${req.tenantDb}\`.college_subjects WHERE id = ?`, [id]);
+        res.json({ success: true, message: 'Subject deleted successfully' });
+    } catch (err) {
+        console.error('[Attendance] Delete subject failed:', err);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 });

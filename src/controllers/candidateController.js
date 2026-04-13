@@ -189,3 +189,65 @@ exports.getUniqueBatches = async (req, res, next) => {
         next(error);
     }
 };
+
+exports.resendInvitation = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organizationId;
+        
+        if (!organizationId) {
+            return res.status(400).json({ success: false, message: 'organization_id is required' });
+        }
+
+        const result = await candidateService.resendInvitation(id, organizationId, req.tenantDb);
+        return res.status(200).json(result);
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.removeCandidateFromPosition = async (req, res, next) => {
+    try {
+        const { id, positionId } = req.params;
+        const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organizationId;
+
+        if (!organizationId) {
+            return res.status(400).json({ success: false, message: 'organization_id is required' });
+        }
+
+        if (!positionId) {
+            return res.status(400).json({ success: false, message: 'positionId is required' });
+        }
+
+        const result = await candidateService.removeCandidateFromPosition(id, positionId, organizationId, req.tenantDb);
+        return res.status(200).json(result);
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.getAssessmentSummaries = async (req, res, next) => {
+    try {
+        const { candidateId, positionId } = req.query;
+        if (!candidateId || !positionId) {
+            return res.status(400).json({ success: false, message: 'candidateId and positionId are required' });
+        }
+        const result = await candidateService.getAssessmentSummary(candidateId, positionId, req.tenantDb);
+        return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.getCandidateCredits = async (req, res, next) => {
+    try {
+        const { id: candidateId } = req.params;
+        if (!candidateId) {
+            return res.status(400).json({ success: false, message: 'Candidate ID is required' });
+        }
+        const result = await candidateService.getCandidateCreditsOverview(candidateId);
+        return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+        next(error);
+    }
+};

@@ -6,3 +6,105 @@
 [CandidateModel] Found 10 rows, total=101
 [CandidateModel] getAllCandidates: db=sharan_m_mmhgw1ga, q=SELECT * FROM sharan_m_mmhgw1ga.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["c55aed1d-8dfc-4896-9c04-450a39f404b5",10,0]
 [CandidateModel] Found 10 rows, total=101
+[CandidateModel] getAllCandidates: db=sharan_m_mmhgw1ga, q=SELECT * FROM sharan_m_mmhgw1ga.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["c55aed1d-8dfc-4896-9c04-450a39f404b5",10,0]
+[CandidateModel] Found 10 rows, total=101
+[CandidateModel] getAllCandidates: db=sharan_m_mmhgw1ga, q=SELECT * FROM sharan_m_mmhgw1ga.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["c55aed1d-8dfc-4896-9c04-450a39f404b5",10,0]
+[CandidateModel] Found 10 rows, total=101
+[CandidateModel] getAllCandidates: db=smith_mnitalrm, q=SELECT * FROM smith_mnitalrm.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aad8206a-4b8e-4481-8d58-bdc29af56506",10,0]
+[CandidateModel] Found 0 rows, total=0
+[CandidateModel] getAllCandidates: db=sharan_m_mmhgw1ga, q=SELECT * FROM sharan_m_mmhgw1ga.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["c55aed1d-8dfc-4896-9c04-450a39f404b5",10,0]
+[CandidateModel] Found 10 rows, total=101
+[CandidateModel] getAllCandidates: db=sharan_m_mmhgw1ga, q=SELECT * FROM sharan_m_mmhgw1ga.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["c55aed1d-8dfc-4896-9c04-450a39f404b5",10,0]
+[CandidateModel] Found 10 rows, total=101
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 0 rows, total=0
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 0 rows, total=0
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 1 rows, total=1
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 1 rows, total=1
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 1 rows, total=1
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 1 rows, total=1
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 1 rows, total=1
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 1 rows, total=1
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 1 rows, total=1
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 2 rows, total=2
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a","Pending",10,0]
+[CandidateModel] Found 0 rows, total=0
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a","Active",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a","Active",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a","Pending",10,0]
+[CandidateModel] Found 0 rows, total=0
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a","Rejected",10,0]
+[CandidateModel] Found 0 rows, total=0
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3

@@ -62,6 +62,23 @@ const ensureJobSchemaIsUpToDate = async (tenantDb) => {
             );
         }
 
+        // 1.3 Update status ENUM to include DRAFT and INACTIVE
+        // First check existing ENUM
+        const statusCol = await db.query(
+            `SHOW COLUMNS FROM \`${tenantDb}\`.jobs LIKE 'status'`,
+            []
+        );
+        if (statusCol.length > 0) {
+            const type = statusCol[0].Type;
+            if (!type.includes("'DRAFT'")) {
+                console.log(`[JobService] Updating status ENUM for ${tenantDb}.jobs to include DRAFT`);
+                await db.query(
+                    `ALTER TABLE \`${tenantDb}\`.jobs MODIFY COLUMN status ENUM('ACTIVE', 'INACTIVE', 'HOLD', 'DRAFT', 'CLOSED') NOT NULL DEFAULT 'ACTIVE'`,
+                    []
+                );
+            }
+        }
+
         // 1.5 Ensure show_to_vendor exists and setup default to 0 (Private)
         const vendorCol = await db.query(
             `SHOW COLUMNS FROM \`${tenantDb}\`.jobs LIKE 'show_to_vendor'`,
@@ -77,6 +94,19 @@ const ensureJobSchemaIsUpToDate = async (tenantDb) => {
             console.log(`[JobService] Adding missing 'show_to_vendor' column to ${tenantDb}.jobs`);
             await db.query(
                 `ALTER TABLE \`${tenantDb}\`.jobs ADD COLUMN show_to_vendor TINYINT(1) DEFAULT 0`,
+                []
+            );
+        }
+
+        // 1.6 Ensure stages column exists for custom kanban columns
+        const stagesCol = await db.query(
+            `SHOW COLUMNS FROM \`${tenantDb}\`.jobs LIKE 'stages'`,
+            []
+        );
+        if (stagesCol.length === 0) {
+            console.log(`[JobService] Adding missing 'stages' column to ${tenantDb}.jobs`);
+            await db.query(
+                `ALTER TABLE \`${tenantDb}\`.jobs ADD COLUMN stages JSON DEFAULT NULL`,
                 []
             );
         }
@@ -206,7 +236,7 @@ const createJob = async (tenantDb, jobData) => {
     const remainingCredits = totalPositionCredits - utilizedPositionCredits;
 
     if (remainingCredits <= 0) {
-        const error = new Error('Insufficient position credits available');
+        const error = new Error('your credits got over please contact to the administrator for the more credits');
         error.status = 402;
         error.creditError = true;
         throw error;
@@ -368,7 +398,9 @@ const getJobs = async (tenantDb, filters = {}) => {
             j.application_deadline as applicationDeadline,
             j.created_at as createdAt,
             HEX(j.client_id) as clientId,
-            c.client_name as clientName
+            c.client_name as clientName,
+            (SELECT COUNT(*) FROM \`${tenantDb}\`.candidates_job WHERE job_id = j.id) as totalCandidates,
+            (SELECT COUNT(*) FROM \`${tenantDb}\`.candidates_job WHERE job_id = j.id AND source = 'RESUME') as resumeCandidates
         FROM \`${tenantDb}\`.jobs j
         LEFT JOIN \`${tenantDb}\`.clients c ON j.client_id = c.id
         LEFT JOIN auth_db.users u ON j.spoc_id = u.id
@@ -388,6 +420,15 @@ const getJobs = async (tenantDb, filters = {}) => {
  */
 const getJobById = async (tenantDb, jobId) => {
     const jobIdClean = jobId.replace(/-/g, '');
+    // Check which column exists in question_sets: job_id or position_id
+    const columnCheck = await db.query(
+        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'question_sets' AND COLUMN_NAME IN ('job_id', 'position_id')`,
+        [tenantDb]
+    );
+    const existingColumns = columnCheck.map(c => c.COLUMN_NAME);
+    const qsIdColumn = existingColumns.includes('job_id') ? 'job_id' : 'position_id';
+
     const query = `
         SELECT 
             HEX(j.id) as id, j.code, j.job_title as jobTitle, j.job_role as jobRole,
@@ -401,9 +442,10 @@ const getJobById = async (tenantDb, jobId) => {
             j.application_deadline as applicationDeadline,
             j.expected_start_date as expectedStartDate,
             j.show_to_vendor as showToVendor, j.internal_notes as internalNotes,
-            j.created_at as createdAt,
+            j.stages, j.created_at as createdAt,
             HEX(j.client_id) as clientId,
-            c.client_name as clientName
+            c.client_name as clientName,
+            (SELECT HEX(id) FROM \`${tenantDb}\`.question_sets WHERE ${qsIdColumn} = j.id AND is_active = 1 LIMIT 1) as questionSetId
         FROM \`${tenantDb}\`.jobs j
         LEFT JOIN \`${tenantDb}\`.clients c ON j.client_id = c.id
         WHERE j.id = UNHEX(?)
@@ -486,6 +528,62 @@ const updateJobVisibility = async (tenantDb, jobId, showToVendor) => {
     }
 };
 
+/**
+ * Update custom Kanban stages configuration for a job
+ */
+const updateJobStages = async (tenantDb, jobId, stages) => {
+    try {
+        const query = `UPDATE \`${tenantDb}\`.jobs SET stages = ? WHERE id = UNHEX(?)`;
+        await db.query(query, [JSON.stringify(stages), jobId.replace(/-/g, '')]);
+        return true;
+    } catch (error) {
+        console.error(`[JobService] updateJobStages error:`, error);
+        throw error;
+    }
+};
+
+const getJobsCounts = async (tenantDb, filters = {}) => {
+    try {
+        await ensureJobSchemaIsUpToDate(tenantDb);
+        const params = [];
+        let whereClauses = [];
+
+        if (filters.createdBy) {
+            whereClauses.push('created_by = UNHEX(?)');
+            params.push(filters.createdBy.replace(/-/g, ''));
+        }
+
+        const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+        const query = `
+            SELECT 
+                COUNT(*) as ALL_JOBS,
+                SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) as ACTIVE,
+                SUM(CASE WHEN status = 'INACTIVE' THEN 1 ELSE 0 END) as INACTIVE,
+                SUM(CASE WHEN status = 'HOLD' THEN 1 ELSE 0 END) as HOLD,
+                SUM(CASE WHEN status = 'DRAFT' THEN 1 ELSE 0 END) as DRAFT,
+                SUM(CASE WHEN status = 'CLOSED' THEN 1 ELSE 0 END) as CLOSED
+            FROM \`${tenantDb}\`.jobs
+            ${whereSql}
+        `;
+
+        const rows = await db.query(query, params);
+        const counts = rows?.[0] || {};
+        
+        return {
+            ALL: Number(counts.ALL_JOBS || 0),
+            ACTIVE: Number(counts.ACTIVE || 0),
+            INACTIVE: Number(counts.INACTIVE || 0),
+            HOLD: Number(counts.HOLD || 0),
+            DRAFT: Number(counts.DRAFT || 0),
+            CLOSED: Number(counts.CLOSED || 0)
+        };
+    } catch (err) {
+        console.error('[JobService] Error in getJobsCounts:', err);
+        throw err;
+    }
+};
+
 module.exports = {
     ensureJobSchemaIsUpToDate,
     createJob,
@@ -495,6 +593,8 @@ module.exports = {
     updateJobPathOnly,
     getJobDescriptionDocument,
     updateJobStatus,
-    updateJobVisibility
+    updateJobVisibility,
+    updateJobStages,
+    getJobsCounts
 };
 

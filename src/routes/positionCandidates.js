@@ -13,7 +13,7 @@ const emailService = require('../services/emailService');
 const whatsappService = require('../services/whatsappService');
 const { getDb, COLLECTIONS } = require('../config/mongo');
 
-const assessmentSummaryDb = () => (config.database && config.database.name) || process.env.DB_NAME || 'candidates_db';
+const assessmentSummaryDb = () => 'candidates_db';
 
 /**
  * POST /position-candidates/add
@@ -189,6 +189,21 @@ router.post('/add', authMiddleware, tenantMiddleware, async (req, res) => {
             });
         } catch (logErr) {
             console.warn('[PositionCandidates] Activity logging failed:', logErr.message);
+        }
+
+        // Always ensure assessment is ready (private link + summary created) so that subsequent test flows don't fail
+        try {
+            const helperResult = await ensureCandidateAssessmentReady(req, {
+                positionCandidateId: result.id,
+                organizationId: orgId,
+                candidateId,
+                positionId,
+                positionName: req.body.positionTitle || 'Assessment',
+                companyName: req.body.companyName || 'Company'
+            });
+            responseData.linkGenerated = helperResult.success;
+        } catch (helperErr) {
+            console.warn('[PositionCandidates] add: ensureCandidateAssessmentReady failed:', helperErr.message);
         }
 
         return res.status(201).json({
@@ -458,16 +473,33 @@ router.post('/manual-invite', authMiddleware, tenantMiddleware, async (req, res)
       } catch (_) {}
     }
 
-    const candidate = await CandidateModel.getCandidateById(linkDetails.candidateId, orgId);
-    const candidateEmail = candidate?.email || candidate?.candidate_email || req.body.candidateEmail;
+    // Resolve candidate email — check linkDetails first (populated via JOIN), then tenant DB, then fallback to candidates_db
+    let candidateEmail = req.body.candidateEmail || linkDetails.candidateEmail;
+    let candidate = null;
     if (!candidateEmail) {
-      return res.status(400).json({ success: false, message: 'Candidate email not found. Provide candidateEmail in body or ensure candidate exists in college_candidates.' });
+      // Try tenant DB first (college linked in tenant schema)
+      try {
+        const emailRows = await db.query(
+          `SELECT email, candidate_name, mobile_number FROM \`${req.tenantDb}\`.college_candidates WHERE candidate_id = ? LIMIT 1`,
+          [linkDetails.candidateId]
+        );
+        if (emailRows && emailRows[0]?.email) {
+          candidate = emailRows[0];
+          candidateEmail = emailRows[0].email;
+        }
+      } catch (_) {}
+    }
+    if (!candidateEmail) {
+      // Fallback: candidates_db
+      candidate = candidate || await CandidateModel.getCandidateById(linkDetails.candidateId, orgId);
+      candidateEmail = candidate?.email || candidate?.candidate_email;
+    }
+    if (!candidateEmail) {
+      return res.status(400).json({ success: false, message: 'Candidate email not found. Ensure the candidate exists in college_candidates.' });
     }
 
-    const statusResult = await CandidateModel.updateRecommendationStatus(req.tenantDb, positionCandidateId, 'MANUALLY_INVITED');
-    if (!statusResult.updated) {
-      return res.status(500).json({ success: false, message: 'Failed to update status to Manually Invited.' });
-    }
+    // Status is updated AFTER email success — done below
+    // Dynamic company name: from body or fetch from tenant
 
     // Dynamic company name: from body or fetch from tenant (college_details / company_details)
     let resolvedCompanyName = (companyName || req.body.companyName || '').trim();
@@ -485,90 +517,50 @@ router.post('/manual-invite', authMiddleware, tenantMiddleware, async (req, res)
     }
     resolvedCompanyName = resolvedCompanyName || 'Company';
 
-    const existingLink = await CandidateModel.getExistingPrivateLinkByCandidateAndPosition(
-      linkDetails.candidateId,
-      linkDetails.positionId,
-      'candidates_db'
-    );
-
-    let linkId, verificationCode, linkReused = false;
-    if (existingLink && existingLink.linkId && existingLink.verificationCode) {
-      linkId = existingLink.linkId;
-      verificationCode = existingLink.verificationCode;
-      linkReused = true;
-      // Update existing link with dynamic company/position so verify returns correct display data
-      await CandidateModel.updatePrivateLinkDisplayFields(
-        linkDetails.candidateId,
-        linkDetails.positionId,
-        { company_name: resolvedCompanyName, position_name: linkDetails.positionName || 'Position' },
-        'candidates_db'
-      );
-    } else {
-      const linkBase = process.env.CANDIDATE_LINK_BASE_URL || 'http://localhost:4002';
-      const linkData = {
-        link_type: 'PRIVATE',
-        candidate_id: linkDetails.candidateId,
-        candidate_name: linkDetails.candidateName || candidate?.candidate_name || 'Candidate',
-        client_id: orgId,
-        company_name: resolvedCompanyName,
-        email: candidateEmail,
-        position_id: linkDetails.positionId,
-        position_name: linkDetails.positionName || 'Position',
-        question_set_id: linkDetails.questionSetId,
-        interview_platform: 'BROWSER',
-        link: linkBase,
-        link_active_at: linkDetails.linkActiveAt || new Date(),
-        link_expires_at: linkDetails.linkExpiresAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        created_by: req.user?.id || req.user?.userId || ''
-      };
-      const created = await CandidateModel.createCandidateLink(linkData, 'candidates_db');
-      linkId = created.linkId;
-      verificationCode = created.verificationCode;
-    }
-
-    // Assessment summary: create only if not present (same as ref flow)
-    const summaryDb = assessmentSummaryDb();
-    let assessmentSummary = await CandidateModel.getAssessmentSummary(linkDetails.candidateId, linkDetails.positionId, summaryDb);
-    if (!assessmentSummary) {
-      let round1Assigned = false, round2Assigned = false, round3Assigned = false, round4Assigned = false;
-      let totalDuration = '0';
-      try {
-        const sections = await questionSectionService.getQuestionSectionsByQuestionSetId(req.tenantDb, linkDetails.questionSetId, req.user?.id);
-        const section = Array.isArray(sections) && sections.length > 0 ? sections[0] : null;
-        if (section) {
-          const genList = (section.generalQuestions || {}).questions || [];
-          const posList = (section.positionSpecificQuestions || {}).questions || [];
-          const codingList = section.codingQuestions || [];
-          const aptitudeList = section.aptitudeQuestions || [];
-          round1Assigned = genList.length > 0;
-          round2Assigned = posList.length > 0;
-          round3Assigned = (Array.isArray(codingList) && codingList.length > 0);
-          round4Assigned = (Array.isArray(aptitudeList) && aptitudeList.length > 0);
-          if (section.totalDuration) totalDuration = section.totalDuration;
-        }
-      } catch (sectionErr) {
-        console.warn('manual-invite: question sections fetch failed, using defaults', sectionErr.message);
-        round1Assigned = true;
-      }
-      const totalRounds = [round1Assigned, round2Assigned, round3Assigned, round4Assigned].filter(Boolean).length;
-      const summaryPayload = {
-        positionId: linkDetails.positionId,
+    // 1. Prepare private link and assessment summary (before sending email)
+    const assessmentReady = await ensureCandidateAssessmentReady(req, {
+        positionCandidateId,
+        organizationId: orgId,
         candidateId: linkDetails.candidateId,
-        questionId: linkDetails.questionSetId,
-        totalRoundsAssigned: totalRounds || 1,
-        totalRoundsCompleted: 0,
-        round1Assigned, round1Completed: false,
-        round2Assigned, round2Completed: false,
-        round3Assigned, round3Completed: false,
-        round4Assigned, round4Completed: false,
-        isAssessmentCompleted: false,
-        isReportGenerated: false,
-        totalInterviewTime: totalDuration
-      };
-      await CandidateModel.createAssessmentSummary(summaryPayload, summaryDb);
+        positionId: linkDetails.positionId,
+        positionName: linkDetails.positionName || 'Position',
+        companyName: resolvedCompanyName,
+        candidateEmail,
+        candidateName: linkDetails.candidateName || candidate?.candidate_name || 'Candidate',
+        questionSetId: linkDetails.questionSetId,
+        linkActiveAt: linkDetails.linkActiveAt,
+        linkExpiresAt: linkDetails.linkExpiresAt
+    });
+
+    const { linkId, verificationCode, linkReused } = assessmentReady;
+
+    // 2. Send email FIRST — only update status if email succeeds
+    const testPortalUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_TEST_PORTAL_URL || process.env.CANDIDATE_LINK_BASE_URL || '').trim() || 'your test portal';
+    const candidateDisplayName = linkDetails.candidateName || candidate?.candidate_name || 'Candidate';
+    const positionDisplayName = linkDetails.positionName || 'the position';
+    const inviteSubject = `You have been manually invited to take the assessment – ${positionDisplayName}`;
+    const inviteBody = `<p>Hi ${candidateDisplayName},</p><p>You have been selected to take an assessment for the position: <strong>${positionDisplayName}</strong> at <strong>${resolvedCompanyName}</strong>.</p><p>Your verification code is: <strong>${verificationCode}</strong></p><p>Take your test at: <a href="${testPortalUrl}">${testPortalUrl}</a></p><p>Enter your registered email and this verification code to start the assessment.</p><p>The link is valid for 7 days.</p><p>Best regards,<br/>${resolvedCompanyName} Recruitment Team</p>`;
+
+    let emailResult;
+    try {
+      emailResult = await emailService.sendEmail(candidateEmail, inviteSubject, inviteBody);
+    } catch (emailErr) {
+      console.error('[manual-invite] Email send error:', emailErr.message);
+      return res.status(500).json({ success: false, message: 'Failed to send invitation email. Status not updated. Please check email configuration.' });
     }
 
-    // Log manual invite activity
+    if (!emailResult || !emailResult.sent) {
+      return res.status(500).json({ success: false, message: `Email not delivered: ${emailResult?.error || 'Unknown email error'}. Candidate status has NOT been updated.` });
+    }
+
+    // 3. Email sent successfully — now update status
+    const statusResult = await CandidateModel.updateRecommendationStatus(req.tenantDb, positionCandidateId, 'MANUALLY_INVITED');
+    if (!statusResult.updated) {
+      // Email was sent but status update failed — log and continue
+      console.warn('[manual-invite] Status update failed after email was sent. positionCandidateId:', positionCandidateId);
+    }
+
+    // 4. Log activity
     try {
         await ActivityLogService.logActivity(req.tenantDb, {
             organizationId: orgId,
@@ -584,24 +576,15 @@ router.post('/manual-invite', authMiddleware, tenantMiddleware, async (req, res)
                 positionId: linkDetails.positionId,
                 candidateId: linkDetails.candidateId,
                 newStatus: 'MANUALLY_INVITED',
-                positionName: linkDetails.positionName || 'Position'
+                positionName: positionDisplayName
             }
         });
     } catch (logErr) {
         console.warn('[PositionCandidates] manual-invite activity logging failed:', logErr.message);
     }
 
-    // Send invite email with verification code and correct position name
+    // 5. Log email activity
     try {
-      const testPortalUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_TEST_PORTAL_URL || process.env.CANDIDATE_LINK_BASE_URL || '').trim() || 'your test portal';
-      const candidateDisplayName = linkDetails.candidateName || candidate?.candidate_name || 'Candidate';
-      const positionDisplayName = linkDetails.positionName || 'the position';
-      const inviteSubject = `You have been manually invited to take the assessment – ${positionDisplayName}`;
-      const inviteBody = `<p>Hi ${candidateDisplayName},</p><p>You have been selected to take an assessment for the position: <strong>${positionDisplayName}</strong> at <strong>${resolvedCompanyName}</strong>.</p><p>Your verification code is: <strong>${verificationCode}</strong></p><p>Take your test at: <a href="${testPortalUrl}">${testPortalUrl}</a></p><p>Enter your registered email and this verification code to start the assessment.</p><p>The link is valid for 7 days.</p><p>Best regards,<br/>${resolvedCompanyName} Recruitment Team</p>`;
-      const emailResult = await emailService.sendEmail(candidateEmail, inviteSubject, inviteBody);
-      
-      // Log single email activity
-      try {
         await ActivityLogService.logActivity(req.tenantDb, {
             organizationId: orgId,
             actorId: req.user?.id || 'SYSTEM',
@@ -615,68 +598,20 @@ router.post('/manual-invite', authMiddleware, tenantMiddleware, async (req, res)
             metadata: {
                 recipient: candidateEmail,
                 subject: inviteSubject,
-                status: emailResult.sent ? 'SENT' : 'FAILED',
-                error: emailResult.error || null,
+                status: 'SENT',
                 positionName: positionDisplayName
             }
         });
-      } catch (logErr) {
-        console.warn('[PositionCandidates] manual-invite single email activity logging failed:', logErr.message);
-      }
-
-      if (!emailResult.sent) {
-        console.warn('[manual-invite] Email not sent:', emailResult.error);
-      }
-    } catch (emailErr) {
-      console.warn('[manual-invite] Email send error (non-fatal):', emailErr.message);
+    } catch (logErr) {
+        console.warn('[PositionCandidates] manual-invite email activity logging failed:', logErr.message);
     }
 
-    // Send WhatsApp invite if mobile number is available
+    // 6. WhatsApp (non-blocking, optional)
     if (candidate?.mobile_number || candidate?.mobileNumber) {
         try {
             const mobileNumber = candidate?.mobile_number || candidate?.mobileNumber;
-            const testPortalUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_TEST_PORTAL_URL || process.env.CANDIDATE_LINK_BASE_URL || '').trim() || 'your test portal';
-            const candidateDisplayName = linkDetails.candidateName || candidate?.candidate_name || 'Candidate';
-            const positionDisplayName = linkDetails.positionName || 'the position';
-            
-            const waBodyValues = [
-                candidateDisplayName,
-                positionDisplayName,
-                resolvedCompanyName,
-                testPortalUrl,
-                verificationCode
-            ];
-            
-            const waResult = await whatsappService.sendWhatsAppMessage(mobileNumber, waBodyValues);
-            
-            // Log WhatsApp activity
-            try {
-                await ActivityLogService.logActivity(req.tenantDb, {
-                    organizationId: orgId,
-                    actorId: req.user?.id || 'SYSTEM',
-                    actorName: req.user?.fullName || req.user?.name || 'System',
-                    actorRole: 'Admin',
-                    activityType: 'WHATSAPP_MESSAGE',
-                    activityTitle: `Manual WhatsApp Invitation sent to ${candidateDisplayName}`,
-                    activityDescription: `Manual assessment invitation WhatsApp for position: ${positionDisplayName}`,
-                    entityId: linkDetails.candidateId,
-                    entityType: 'CANDIDATE',
-                    metadata: {
-                        recipient: mobileNumber,
-                        status: waResult.sent ? 'SENT' : 'FAILED',
-                        error: waResult.error || null,
-                        positionName: positionDisplayName,
-                        positionId: linkDetails.positionId,
-                        candidateId: linkDetails.candidateId
-                    }
-                });
-            } catch (logErr) {
-                console.warn('[PositionCandidates] manual-invite WhatsApp activity logging failed:', logErr.message);
-            }
-
-            if (!waResult.sent) {
-                console.warn('[manual-invite] WhatsApp not sent:', waResult.error);
-            }
+            const waBodyValues = [candidateDisplayName, positionDisplayName, resolvedCompanyName, testPortalUrl, verificationCode];
+            await whatsappService.sendWhatsAppMessage(mobileNumber, waBodyValues);
         } catch (waErr) {
             console.warn('[manual-invite] WhatsApp send error (non-fatal):', waErr.message);
         }
@@ -685,8 +620,8 @@ router.post('/manual-invite', authMiddleware, tenantMiddleware, async (req, res)
     return res.status(200).json({
       success: true,
       message: linkReused
-        ? 'Manual invite completed. Existing private link reused; assessment summary ensured. Status set to Manually Invited.'
-        : 'Manual invite completed. Private link and assessment summary created; status set to Manually Invited.',
+        ? 'Manual invite completed. Email sent, existing private link reused, status set to Manually Invited.'
+        : 'Manual invite completed. Email sent, private link created, status set to Manually Invited.',
       data: {
         positionCandidateId,
         recommendationStatus: 'MANUALLY_INVITED',
@@ -732,6 +667,161 @@ router.get('/position/:positionId/candidate/:candidateId', authMiddleware, tenan
         return res.status(500).json({ success: false, message: error.message });
     }
 });
+
+/**
+ * Helper to ensure a candidate has a private link and an assessment summary.
+ * Used during INVITED and MANUALLY_INVITED flows.
+ */
+async function ensureCandidateAssessmentReady(req, details) {
+    const {
+        positionCandidateId,
+        organizationId,
+        candidateId,
+        positionId,
+        positionName,
+        companyName,
+        candidateEmail: emailFromCaller,
+        candidateName: nameFromCaller,
+        questionSetId: qsIdFromCaller,
+        linkActiveAt,
+        linkExpiresAt
+    } = details;
+
+    const tenantDb = req.tenantDb;
+    const summaryDb = assessmentSummaryDb();
+
+    // 1. Resolve Missing Details from DB if needed
+    let candidateId_ = candidateId;
+    let positionId_ = positionId;
+    let questionSetId_ = qsIdFromCaller;
+    let candidateEmail = emailFromCaller;
+    let resolvedPositionName = positionName || 'Assessment';
+    let resolvedCandidateName = nameFromCaller || 'Candidate';
+
+    if (!candidateId_ || !questionSetId_ || !candidateEmail) {
+        const linkDetails = await CandidateModel.getPositionCandidateDetailsForLink(tenantDb, positionCandidateId);
+        if (linkDetails) {
+            candidateId_ = candidateId_ || linkDetails.candidateId;
+            positionId_ = positionId_ || linkDetails.positionId;
+            questionSetId_ = questionSetId_ || linkDetails.questionSetId;
+            candidateEmail = candidateEmail || linkDetails.candidateEmail;
+            resolvedCandidateName = nameFromCaller || linkDetails.candidateName || 'Candidate';
+            resolvedPositionName = positionName || linkDetails.positionName || 'Assessment';
+        }
+    }
+
+    // Final fallback for email: lookup in tenant DB first, then candidates_db
+    if (!candidateEmail && candidateId_) {
+        try {
+            const emailRows = await db.query(
+                `SELECT email, candidate_name, mobile_number FROM \`${tenantDb}\`.college_candidates WHERE candidate_id = ? LIMIT 1`,
+                [candidateId_]
+            );
+            if (emailRows && emailRows[0]?.email) {
+                candidateEmail = emailRows[0].email;
+                resolvedCandidateName = resolvedCandidateName !== 'Candidate' ? resolvedCandidateName : (emailRows[0].candidate_name || resolvedCandidateName);
+            }
+        } catch (_) {}
+    }
+    if (!candidateEmail && candidateId_) {
+        const candidate = await CandidateModel.getCandidateById(candidateId_, organizationId);
+        candidateEmail = candidate?.email || candidate?.candidate_email;
+    }
+
+    if (!candidateEmail || !candidateId_ || !questionSetId_) {
+        throw new Error('Incomplete data for assessment readiness: email, candidateId, and questionSetId are required.');
+    }
+
+    // 2. Private Link Creation/Re-use
+    const existingLink = await CandidateModel.getExistingPrivateLinkByCandidateAndPosition(
+        candidateId_,
+        positionId_,
+        'candidates_db'
+    );
+
+    let linkId, verificationCode, linkReused = false;
+    if (existingLink && existingLink.linkId && existingLink.verificationCode) {
+        linkId = existingLink.linkId;
+        verificationCode = existingLink.verificationCode;
+        linkReused = true;
+        // Update display fields if needed
+        await CandidateModel.updatePrivateLinkDisplayFields(
+            candidateId_,
+            positionId_,
+            { company_name: companyName, position_name: resolvedPositionName },
+            'candidates_db'
+        );
+    } else {
+        const linkBase = process.env.CANDIDATE_LINK_BASE_URL || 'http://localhost:4002';
+        const linkData = {
+            link_type: 'PRIVATE',
+            candidate_id: candidateId_,
+            candidate_name: resolvedCandidateName,
+            client_id: organizationId,
+            company_name: companyName,
+            email: candidateEmail,
+            position_id: positionId_,
+            position_name: resolvedPositionName,
+            question_set_id: questionSetId_,
+            interview_platform: 'BROWSER',
+            link: linkBase,
+            link_active_at: linkActiveAt || new Date(),
+            link_expires_at: linkExpiresAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            created_by: req.user?.id || ''
+        };
+        const created = await CandidateModel.createCandidateLink(linkData, 'candidates_db');
+        linkId = created.linkId;
+        verificationCode = created.verificationCode;
+    }
+
+    // 3. Assessment Summary Initialization
+    let assessmentSummary = await CandidateModel.getAssessmentSummary(candidateId_, positionId_, summaryDb);
+    if (!assessmentSummary) {
+        let round1Assigned = false, round2Assigned = false, round3Assigned = false, round4Assigned = false;
+        let totalDuration = '0';
+        try {
+            const sections = await questionSectionService.getQuestionSectionsByQuestionSetId(tenantDb, questionSetId_, req.user?.id);
+            const section = Array.isArray(sections) && sections.length > 0 ? sections[0] : null;
+            if (section) {
+                const genList = (section.generalQuestions || {}).questions || [];
+                const posList = (section.positionSpecificQuestions || {}).questions || [];
+                const codingList = section.codingQuestions || [];
+                const aptitudeList = section.aptitudeQuestions || [];
+                round1Assigned = genList.length > 0;
+                round2Assigned = posList.length > 0;
+                round3Assigned = (Array.isArray(codingList) && codingList.length > 0);
+                round4Assigned = (Array.isArray(aptitudeList) && aptitudeList.length > 0);
+                if (section.totalDuration) totalDuration = section.totalDuration;
+            }
+        } catch (sectionErr) {
+            console.warn('ensureCandidateAssessmentReady: question sections fetch failed, using defaults', sectionErr.message);
+            round1Assigned = true;
+        }
+        const totalRounds = [round1Assigned, round2Assigned, round3Assigned, round4Assigned].filter(Boolean).length;
+        const summaryPayload = {
+            positionId: positionId_,
+            candidateId: candidateId_,
+            questionId: questionSetId_,
+            totalRoundsAssigned: totalRounds || 1,
+            totalRoundsCompleted: 0,
+            round1Assigned, round1Completed: false,
+            round2Assigned, round2Completed: false,
+            round3Assigned, round3Completed: false,
+            round4Assigned, round4Completed: false,
+            isAssessmentCompleted: false,
+            isReportGenerated: false,
+            totalInterviewTime: totalDuration
+        };
+        await CandidateModel.createAssessmentSummary(summaryPayload, summaryDb);
+    }
+
+    return {
+        success: true,
+        linkId,
+        verificationCode,
+        linkReused
+    };
+}
 
 module.exports = router;
 module.exports.handleScoreResume = handleScoreResume;

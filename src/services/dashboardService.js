@@ -21,7 +21,7 @@ class DashboardService {
                 [tenantDb]
             );
             const tables = (tableCheck || []).map(t => t.TABLE_NAME);
-            const isAts = tables.includes('job_candidates');
+            const isAts = filters.isCollege === false || (filters.isCollege === undefined && tables.includes('job_candidates'));
 
             // 1. Position Counts (Active)
             const posTable = tables.includes('jobs') ? 'jobs' : 'positions';
@@ -35,20 +35,30 @@ class DashboardService {
             const [posRow] = await db.query(posSql, posParams);
 
             // 2. Candidate Counts (Total for this Org)
-            const candTable = tables.includes('candidates') ? 'candidates' : 
-                             (tables.includes('college_candidates') ? 'college_candidates' : null);
-            
-            const isLocalCandidates = candTable === 'candidates';
-            let candSql = candTable ? `SELECT COUNT(*) as count FROM \`${tenantDb}\`.\`${candTable}\` WHERE organization_id = ?` : null;
-            const candParams = candTable ? [isAts ? orgIdBuffer : organizationId] : [];
-            
-            if (candSql && actorId) {
-                candSql += isLocalCandidates ? ` AND created_by = ?` : ` AND candidate_created_by = ?`;
-                candParams.push(actorId);
+            let candCount = 0;
+            if (isAts) {
+                // For ATS, candidates are in candidates_db.ats_candidates
+                const [atsCandRow] = await db.query(
+                    `SELECT COUNT(*) as count FROM candidates_db.ats_candidates WHERE organization_id = UNHEX(?)`,
+                    [organizationId.replace(/-/g, '')]
+                );
+                candCount = atsCandRow?.count || 0;
+            } else {
+                const candTable = tables.includes('candidates') ? 'candidates' : 
+                                 (tables.includes('college_candidates') ? 'college_candidates' : null);
+                
+                const isLocalCandidates = candTable === 'candidates';
+                let candSql = candTable ? `SELECT COUNT(*) as count FROM \`${tenantDb}\`.\`${candTable}\` WHERE organization_id = ?` : null;
+                const candParams = candTable ? [organizationId] : [];
+                
+                if (candSql && actorId) {
+                    candSql += isLocalCandidates ? ` AND created_by = ?` : ` AND candidate_created_by = ?`;
+                    candParams.push(actorId);
+                }
+                
+                const candResult = candSql ? await db.query(candSql, candParams) : [{ count: 0 }];
+                candCount = candResult[0]?.count || 0;
             }
-            
-            const candResult = candSql ? await db.query(candSql, candParams) : [{ count: 0 }];
-            const candRow = candResult[0];
 
             // 3. Interview/Assessment Counts
             let interviewCount = 0;
@@ -87,7 +97,7 @@ class DashboardService {
 
             return {
                 totalPositions: posRow?.count || 0,
-                totalCandidates: candRow?.count || 0,
+                totalCandidates: candCount,
                 totalInterviews: interviewCount,
                 credits: creditRow ? {
                     interviews: {
@@ -346,21 +356,25 @@ class DashboardService {
 
         try {
             const tableCheck = await db.query(
-                `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('positions', 'jobs')`,
+                `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('positions', 'jobs', 'job_candidates')`,
                 [tenantDb]
             );
             const tables = (tableCheck || []).map(t => t.TABLE_NAME);
-            const posTable = tables.includes('jobs') ? 'jobs' : 'positions';
-            const statusCol = tables.includes('jobs') ? 'status' : 'position_status';
-            const titleCol = tables.includes('jobs') ? 'requirement_name' : 'title';
-            const codeCol = tables.includes('jobs') ? 'code' : 'code';
-            const countTable = tables.includes('jobs') ? 'job_candidates' : 'candidate_positions';
-            const fkCol = tables.includes('jobs') ? 'job_id' : 'position_id';
+            const useJobs = tables.includes('jobs');
+            const isAts = tables.includes('job_candidates');
+            const posTable = useJobs ? 'jobs' : 'positions';
+            const statusCol = useJobs ? 'status' : 'position_status';
+            const titleCol = useJobs ? 'job_title' : 'title';
+            const codeCol = useJobs ? 'code' : 'code';
+            const countTable = isAts ? 'job_candidates' : 'candidate_positions';
+            const fkCol = isAts ? 'job_id' : 'position_id';
 
             const posSql = `
                 SELECT 
                     p.id, p.\`${codeCol}\` as position_code, p.\`${titleCol}\` as job_title, p.created_at, 
-                    p.\`${statusCol}\` as status, p.created_by, p.no_of_positions,
+                    p.\`${statusCol}\` as status, p.created_by,
+                    ${useJobs ? 'p.job_type' : 'NULL'} as job_type,
+                    ${useJobs ? 'p.location' : 'NULL'} as location,
                     u.first_name, u.last_name, u.email as admin_email,
                     (SELECT COUNT(*) FROM \`${tenantDb}\`.\`${countTable}\` pc WHERE pc.\`${fkCol}\` = p.id) as candidates_count
                 FROM \`${tenantDb}\`.\`${posTable}\` p
@@ -368,53 +382,38 @@ class DashboardService {
                 ORDER BY p.created_at DESC LIMIT 3
             `;
             result.positions = await db.query(posSql);
-        } catch (e) {
-            console.error('[RecentGrid] positions ERROR:', e.message);
-        }
 
-        try {
-            const candTableCheck = await db.query(
-                `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('candidates', 'college_candidates')`,
-                [tenantDb]
-            );
-            const candTables = (candTableCheck || []).map(t => t.TABLE_NAME);
-            const candTable = candTables.includes('candidates') ? 'candidates' : 
-                             (candTables.includes('college_candidates') ? 'college_candidates' : null);
-
-            if (candTable) {
-                const isLocalCandidates = (candTable === 'candidates');
-                const dateCol = isLocalCandidates ? 'created_date' : 'created_at';
-                const actorCol = isLocalCandidates ? 'created_by' : 'candidate_created_by';
-                const nameExpr = isLocalCandidates ? "CONCAT(c.first_name, ' ', c.last_name)" : "c.candidate_name";
-                const regCol = isLocalCandidates ? 'reg_number' : 'register_no';
-
+            // Fetch Recent Candidates
+            if (isAts) {
                 const candSql = `
                     SELECT 
-                        c.candidate_code, ${nameExpr} as candidate_name, c.email, c.\`${dateCol}\` as created_at,
-                        c.\`${actorCol}\` as added_by, c.\`${regCol}\` as reg_number,
-                        u.first_name, u.last_name, u.email as admin_email
-                    FROM \`${tenantDb}\`.\`${candTable}\` c
-                    LEFT JOIN auth_db.users u ON u.id = c.\`${actorCol}\`
-                    WHERE c.organization_id = ?
-                    ORDER BY c.\`${dateCol}\` DESC LIMIT 3
-                `;
-                result.candidates = await db.query(candSql, [organizationId]);
-            } else if (isCollege) {
-                // Fallback to central candidates_db for legacy college setup
-                const candSql = `
-                    SELECT 
-                        c.candidate_code, c.candidate_name, c.email, c.created_at,
-                        c.candidate_created_by as added_by, c.register_no as reg_number,
-                        u.first_name, u.last_name, u.email as admin_email
-                    FROM candidates_db.college_candidates c
-                    LEFT JOIN auth_db.users u ON u.id = c.candidate_created_by
-                    WHERE c.organization_id = ?
+                        c.candidate_code, c.name as candidate_name, c.email, c.created_at,
+                        LOWER(BIN_TO_UUID(c.organization_id)) as organization_id
+                    FROM candidates_db.ats_candidates c
+                    WHERE c.organization_id = UNHEX(?)
                     ORDER BY c.created_at DESC LIMIT 3
                 `;
-                result.candidates = await db.query(candSql, [organizationId]);
+                result.candidates = await db.query(candSql, [organizationId.replace(/-/g, '')]);
+            } else {
+                const candTable = tables.includes('candidates') ? 'candidates' : 
+                                 (tables.includes('college_candidates') ? 'college_candidates' : null);
+                if (candTable) {
+                    const isLocal = candTable === 'candidates';
+                    const dateCol = isLocal ? 'created_date' : 'created_at';
+                    const actorCol = isLocal ? 'created_by' : 'candidate_created_by';
+                    const nameExpr = isLocal ? "CONCAT(c.first_name, ' ', c.last_name)" : "c.candidate_name";
+                    
+                    const candSql = `
+                        SELECT c.candidate_code, ${nameExpr} as candidate_name, c.email, c.\`${dateCol}\` as created_at
+                        FROM \`${tenantDb}\`.\`${candTable}\` c
+                        WHERE c.organization_id = ?
+                        ORDER BY c.\`${dateCol}\` DESC LIMIT 3
+                    `;
+                    result.candidates = await db.query(candSql, [organizationId]);
+                }
             }
         } catch (e) {
-            console.error('[RecentGrid] candidates ERROR:', e.message);
+            console.error('[RecentGrid] ERROR:', e.message);
         }
 
         try {
@@ -428,7 +427,7 @@ class DashboardService {
             if (tables.includes('job_candidates')) {
                 tableName = 'job_candidates';
                 statusCol = 'recommendation';
-                jobTitleJoin = 'j.requirement_name';
+                jobTitleJoin = 'j.job_title';
             } else if (tables.includes('position_candidates')) {
                 tableName = 'position_candidates';
                 statusCol = 'recommendation';
@@ -546,20 +545,22 @@ class DashboardService {
                 SELECT
                     SUM(CASE WHEN \`${statusCol}\` IN ('Invited', 'invited', 'INVITED', 'PENDING') THEN 1 ELSE 0 END) as invited,
                     SUM(CASE WHEN \`${statusCol}\` IN ('Recommended', 'RECOMMENDED', 'recommended', 'SELECTED') THEN 1 ELSE 0 END) as recommended,
-                    SUM(CASE WHEN \`${statusCol}\` IN ('Not-Recommended', 'NOT_RECOMMENDED', 'not-recommended', 'Not Recommended', 'RESUME_REJECTED') THEN 1 ELSE 0 END) as not_recommended,
+                    SUM(CASE WHEN \`${statusCol}\` IN ('Not-Recommended', 'NOT_RECOMMENDED', 'not-recommended', 'Not Recommended') THEN 1 ELSE 0 END) as not_recommended,
                     SUM(CASE WHEN \`${statusCol}\` IN ('Cautiously Recommended', 'CAUTIOUSLY_RECOMMENDED', 'cautiously-recommended') THEN 1 ELSE 0 END) as cautiously_recommended,
                     SUM(CASE WHEN \`${statusCol}\` IN ('Resume Rejected', 'RESUME_REJECTED', 'resume-rejected', 'Resume-Rejected') THEN 1 ELSE 0 END) as resume_rejected
                 FROM \`${tenantDb}\`.\`${tableName}\`
                 WHERE 1=1
-                ${hasOrg ? 'AND organization_id = ?' : ''}
+                ${hasOrg ? 'AND (organization_id = ? OR organization_id = UNHEX(?))' : ''}
             `;
-            const params = hasOrg ? [organizationId] : [];
+            const orgHex = organizationId.replace(/-/g, '');
+            const params = hasOrg ? [organizationId, orgHex] : [];
             const [row] = await db.query(sql, params);
             return [
                 { metric: 'Invited', value: Number(row?.invited) || 0 },
                 { metric: 'Recommended', value: Number(row?.recommended) || 0 },
-                { metric: 'Rejected', value: Number(row?.not_recommended) || Number(row?.resume_rejected) || 0 },
-                { metric: 'Cautious', value: Number(row?.cautiously_recommended) || 0 }
+                { metric: 'Not Recommended', value: Number(row?.not_recommended) || 0 },
+                { metric: 'Cautiously Recommended', value: Number(row?.cautiously_recommended) || 0 },
+                { metric: 'Resume Rejected', value: Number(row?.resume_rejected) || 0 }
             ];
         } catch (e) {
             console.error('[DashboardService] getCandidateStatusCounts ERROR:', e.message);

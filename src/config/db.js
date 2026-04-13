@@ -14,7 +14,7 @@ const initializePool = async () => {
 		port: config.database.port,
 		user: config.database.user,
 		password: config.database.password,
-		database: config.database.name,
+		// database: config.database.name, // Removed to support multi-tenant dynamic schemas without failing if default DB is missing
 		waitForConnections: true,
 		connectionLimit: config.database.poolSize,
 		queueLimit: 0,

@@ -10,7 +10,11 @@ const emailTemplateController = require('../controllers/emailTemplateController'
 router.use(authMiddleware);
 router.use(tenantMiddleware);
 
-// Relocated to /admins prefix in admins.js
+// Relocated to /admins prefix in admins.js, but also keeping here for consistency with mass-email frontend
+router.get('/email-templates', authMiddleware, tenantMiddleware, emailTemplateController.getAllTemplates);
+router.post('/email-templates', authMiddleware, tenantMiddleware, emailTemplateController.createTemplate);
+router.put('/email-templates/:id', authMiddleware, tenantMiddleware, emailTemplateController.updateTemplate);
+router.delete('/email-templates/:id', authMiddleware, tenantMiddleware, emailTemplateController.deleteTemplate);
 
 
 /**
@@ -21,6 +25,24 @@ router.use(tenantMiddleware);
  *     tags: [Candidates]
  */
 router.get('/academic-metadata', authMiddleware, candidateController.getAcademicMetadata);
+
+// Get candidate assessments summary for Stages (R1..R4)
+router.get('/assessment-summaries', candidateController.getAssessmentSummaries);
+
+/**
+ * @swagger
+ * /candidates/{id}/credits:
+ *   get:
+ *     summary: Get candidate credit overview and usage history
+ *     tags: [Candidates]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ */
+router.get('/:id/credits', candidateController.getCandidateCredits);
 
 /**
  * @swagger
@@ -100,21 +122,31 @@ router.get('/bulk-email/failures/:mongoId', authMiddleware, candidateController.
  */
 router.post('/', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organization_id;
-    if (!organizationId) {
-      return res.status(400).json({
-        success: false,
-        message: 'organization_id is required'
-      });
-    }
-    const userId = req.user?.id || req.headers['x-user-id'] || req.headers['X-User-Id'] || req.headers['X-User-ID'];
-    const candidateData = {
-      ...req.body,
-      candidate_created_by: userId || req.body.candidate_created_by
-    };
+    const multer = require('multer');
+    const upload = multer({ storage: multer.memoryStorage() });
 
-    const result = await CandidateService.createCandidate(candidateData, req.tenantDb);
-    res.status(201).json(result);
+    upload.single('resumeFile')(req, res, async (err) => {
+      if (err) {
+        return res.status(400).json({ success: false, message: 'File upload error: ' + err.message });
+      }
+
+      const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organization_id;
+      if (!organizationId) {
+        return res.status(400).json({
+          success: false,
+          message: 'organization_id is required'
+        });
+      }
+
+      const userId = req.user?.id || req.headers['x-user-id'] || req.headers['X-User-Id'] || req.headers['X-User-ID'];
+      const candidateData = {
+        ...req.body,
+        candidate_created_by: userId || req.body.candidate_created_by
+      };
+
+      const result = await CandidateService.createCandidate(candidateData, req.tenantDb, req.file);
+      res.status(201).json(result);
+    });
   } catch (error) {
     res.status(400).json({
       success: false,
@@ -241,7 +273,7 @@ router.post('/verify-global-otp', authMiddleware, async (req, res) => {
 router.get('/counts', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
     const filters = {
-      organizationId: req.query.organization_id,
+      organizationId: req.user?.organizationId || req.query.organization_id,
       searchTerm: req.query.searchTerm,
       createdBy: req.user?.dataFilter?.createdBy || req.query.createdBy,
       dateFrom: req.query.dateFrom,
@@ -292,7 +324,7 @@ router.get('/counts', authMiddleware, tenantMiddleware, rbacMiddleware('candidat
  */
 router.get('/students/counts', authMiddleware, rbacMiddleware('students'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id || req.query.organizationId;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId;
     if (!organizationId) {
       return res.status(400).json({ success: false, message: 'organization_id is required' });
     }
@@ -361,7 +393,7 @@ router.get('/students/batches', authMiddleware, async (req, res) => {
  */
 router.get('/students', authMiddleware, rbacMiddleware('students'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id || req.query.organizationId;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId;
     if (!organizationId) {
       return res.status(400).json({ success: false, message: 'organization_id is required' });
     }
@@ -471,7 +503,7 @@ router.get('/', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), 
       : (sortOrderParam === 'ASC' ? 'ASC' : 'DESC');
 
     const filters = {
-      organizationId: req.query.organization_id || req.query.organizationId,
+      organizationId: req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId,
       page: parseInt(req.query.page) || 0,
       pageSize: parseInt(req.query.size || req.query.pageSize) || 10,
       status: req.query.recommendationStatus || req.query.status,
@@ -780,7 +812,7 @@ router.get('/check-whatsapp/:whatsapp', authMiddleware, rbacMiddleware('candidat
  */
 router.get('/:id/positions', authMiddleware, tenantMiddleware, async (req, res) => {
   try {
-    const organizationId = req.query.organization_id || req.query.organizationId;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId;
     if (!organizationId) {
       return res.status(400).json({ success: false, message: 'organization_id is required' });
     }
@@ -889,16 +921,25 @@ router.get('/:id/resume/download', authMiddleware, rbacMiddleware('candidates'),
  */
 router.put('/:id', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
-    if (!organizationId) {
-      return res.status(400).json({
-        success: false,
-        message: 'organization_id is required'
-      });
-    }
+    const multer = require('multer');
+    const upload = multer({ storage: multer.memoryStorage() });
 
-    const result = await CandidateService.updateCandidate(req.params.id, organizationId, req.body, req.tenantDb);
-    res.status(200).json(result);
+    upload.single('resumeFile')(req, res, async (err) => {
+      if (err) {
+        return res.status(400).json({ success: false, message: 'File upload error: ' + err.message });
+      }
+
+      const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.body.organization_id;
+      if (!organizationId) {
+        return res.status(400).json({
+          success: false,
+          message: 'organization_id is required'
+        });
+      }
+
+      const result = await CandidateService.updateCandidate(req.params.id, organizationId, req.body, req.tenantDb, req.file);
+      res.status(200).json(result);
+    });
   } catch (error) {
     res.status(error.message.includes('not found') ? 404 : 400).json({
       success: false,
@@ -1018,7 +1059,8 @@ router.put('/:id/status', authMiddleware, rbacMiddleware('candidates'), async (r
       organizationId,
       req.body.status,
       changedBy,
-      req.body.remarks
+      req.body.remarks,
+      req.tenantDb
     );
     res.status(200).json(result);
   } catch (error) {
@@ -1443,7 +1485,35 @@ router.get('/public-position/:positionId/:organizationId', async (req, res) => {
   }
 });
 
+// Get public job description (no auth required)
+router.get('/public-position/:positionId/:organizationId/job-description', async (req, res) => {
+  try {
+    const { buffer, filename } = await CandidateService.getPublicJobDescription(
+      req.params.positionId,
+      req.params.organizationId
+    );
+    // Get fileStorageUtil and docExtractor from services if needed, but easier to use existing controller logic style
+    // We need to resolve content type
+    const path = require('path');
+    const ext = path.extname(filename).toLowerCase();
+    let contentType = 'application/pdf';
+    if (ext === '.docx') contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buffer);
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
 
 
+
+
+router.post('/:id/resend-invitation', authMiddleware, rbacMiddleware('students'), candidateController.resendInvitation);
+router.delete('/:id/position/:positionId', authMiddleware, rbacMiddleware('candidates'), candidateController.removeCandidateFromPosition);
 
 module.exports = router;
