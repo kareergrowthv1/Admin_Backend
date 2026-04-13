@@ -1,20 +1,32 @@
 const db = require('../config/db');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const { CANDIDATE_STATUSES, LINK_TYPES, ASSESSMENT_ROUNDS } = require('./candidateConstants');
 
 const getNextCandidateCode = async (database) => {
-  const rows = await db.query(
-    `SELECT candidate_code FROM ${database}.college_candidates
-     WHERE candidate_code REGEXP '^CAN[0-9]{4,}$'
-     ORDER BY CAST(SUBSTRING(candidate_code, 4) AS UNSIGNED) DESC
-     LIMIT 1`,
-    []
-  );
+  const dbsToCheck = ['candidates_db'];
+  if (database && database !== 'candidates_db') {
+    dbsToCheck.push(database);
+  }
 
-  const maxCode = rows[0]?.candidate_code;
   let maxSeq = 0;
-  if (maxCode) {
-    maxSeq = parseInt(maxCode.substring(3));
+  for (const dbName of dbsToCheck) {
+      try {
+          const rows = await db.query(
+            `SELECT candidate_code FROM ${dbName}.college_candidates
+             WHERE candidate_code REGEXP '^CAN[0-9]{4,}$'
+             ORDER BY CAST(SUBSTRING(candidate_code, 4) AS UNSIGNED) DESC
+             LIMIT 1`,
+            []
+          );
+          const code = rows[0]?.candidate_code;
+          if (code) {
+              const seq = parseInt(code.substring(3));
+              if (seq > maxSeq) maxSeq = seq;
+          }
+      } catch (e) {
+          // Table might not exist in this DB yet during check
+      }
   }
 
   const nextSeq = maxSeq + 1;
@@ -22,8 +34,20 @@ const getNextCandidateCode = async (database) => {
 };
 
 class CandidateModel {
-  // Create a new candidate
-  static async createCandidate(candidateData, database = 'candidates_db') {
+  // Create a new candidate (shared or tenant-specific)
+  static async createCandidate(candidateData, contextDb = 'candidates_db') {
+    let targetDb = contextDb;
+    if (contextDb !== 'candidates_db') {
+      const tableCheck = await db.query(
+        `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'college_candidates'`,
+        [contextDb]
+      );
+      if (!tableCheck || tableCheck.length === 0) {
+        targetDb = 'candidates_db';
+      }
+    }
+    const database = targetDb;
+
     const candidateId = uuidv4();
     const createdAt = new Date();
 
@@ -31,54 +55,60 @@ class CandidateModel {
     const query = `
         INSERT INTO ${database}.college_candidates (
           candidate_id, organization_id, candidate_code, register_no,
-          candidate_name, department, semester,
+          candidate_name, department, semester, year_of_passing,
           email, mobile_number, location, address, birthdate,
           resume_filename, resume_url,
           interview_notes, internal_notes, notes_by, notes_date,
-          status, skills, candidate_created_by, candidate_created_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          status, skills, candidate_created_by, candidate_created_at, created_at, updated_at,
+          dept_id, branch_id, department_name
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    let candidateCode = candidateData.candidate_code;
+    let candidateCode = candidateData.candidate_code || candidateData.candidateCode;
     const canMatch = candidateCode && String(candidateCode).trim().match(/^CAN(\d+)$/i);
     if (canMatch) {
       candidateCode = `CAN${String(parseInt(canMatch[1], 10)).padStart(4, '0')}`;
     } else {
       candidateCode = null;
     }
+    
     let inserted = false;
     let attempts = 0;
 
-    while (!inserted && attempts < 3) {
+    while (!inserted && attempts < 5) {
       if (!candidateCode) {
         candidateCode = await getNextCandidateCode(database);
       }
 
       const values = [
         candidateId,
-        candidateData.organization_id,
+        candidateData.organization_id || candidateData.organizationId,
         candidateCode,
-        candidateData.register_no,
-        candidateData.candidate_name,
-        candidateData.department,
-        candidateData.semester,
-        candidateData.email,
-        candidateData.mobile_number,
-        candidateData.location,
-        candidateData.address,
-        candidateData.birthdate,
-        candidateData.resume_filename,
-        candidateData.resume_url,
-        candidateData.interview_notes,
-        candidateData.internal_notes,
-        candidateData.notes_by,
-        candidateData.notes_date,
+        candidateData.register_no || null,
+        candidateData.candidate_name || candidateData.candidateName,
+        candidateData.department_name || candidateData.department || null,
+        candidateData.semester || null,
+        candidateData.year_of_passing || null,
+        candidateData.email || null,
+        candidateData.mobile_number || null,
+        candidateData.location || null,
+        candidateData.address || null,
+        candidateData.birthdate || null,
+        candidateData.resume_filename || null,
+        candidateData.resume_url || null,
+        candidateData.interview_notes || null,
+        candidateData.internal_notes || null,
+        candidateData.notes_by || null,
+        candidateData.notes_date || null,
         candidateData.status || CANDIDATE_STATUSES.ALL,
         skillsJson,
-        candidateData.candidate_created_by,
+        candidateData.candidate_created_by || null,
         candidateData.candidate_created_at || createdAt,
         createdAt,
-        createdAt
+        createdAt,
+        candidateData.dept_id || null,
+        candidateData.branch_id || null,
+        candidateData.department_name || null
       ];
 
       try {
@@ -86,15 +116,14 @@ class CandidateModel {
         inserted = true;
       } catch (error) {
         if (error && error.code === 'ER_DUP_ENTRY') {
-          // If the duplicate is on candidate_code, we retry with a new code
-          // BUT if it's on the email+org unique key, we should NOT retry and instead throw a specific error
           if (error.message.includes('uk_email_org') || error.message.includes('college_candidates.email')) {
             throw new Error(`Candidate with email ${candidateData.email} already exists in this organization`);
           }
-
-          candidateCode = null;
-          attempts += 1;
-          continue;
+          if (error.message.includes('candidate_code')) {
+            candidateCode = null;
+            attempts += 1;
+            continue;
+          }
         }
         throw error;
       }
@@ -107,14 +136,27 @@ class CandidateModel {
     return candidateId;
   }
 
-  // Get candidate by ID (college_candidates stored in candidates_db)
-  static async getCandidateById(candidateId, organizationId, database = 'candidates_db') {
+  // Get candidate by ID (shared or tenant-specific)
+  static async getCandidateById(candidateId, organizationId, contextDb = 'candidates_db') {
+    let targetDb = contextDb;
+    if (contextDb !== 'candidates_db') {
+      const tableCheck = await db.query(
+        `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'college_candidates'`,
+        [contextDb]
+      );
+      if (!tableCheck || tableCheck.length === 0) {
+        targetDb = 'candidates_db';
+      }
+    }
+    const database = targetDb;
+
     const query = `
-      SELECT * FROM \`${database}\`.college_candidates
-      WHERE candidate_id = ? AND organization_id = ?
+      SELECT * FROM ${database}.college_candidates 
+      WHERE (candidate_id = ? OR REPLACE(candidate_id, '-', '') = REPLACE(?, '-', ''))
+      AND organization_id = ?
       LIMIT 1
     `;
-    const rows = await db.query(query, [candidateId, organizationId]);
+    const rows = await db.query(query, [candidateId, candidateId, organizationId]);
     return rows.length > 0 ? rows[0] : null;
   }
 
@@ -131,7 +173,11 @@ class CandidateModel {
       sortBy = 'created_at',
       sortOrder = 'DESC',
       dateFrom,
-      dateTo
+      dateTo,
+      deptIds = [],
+      branchIds = [],
+      semesters = [],
+      batches = []
     } = filters;
 
     const allowedSortFields = [
@@ -183,6 +229,34 @@ class CandidateModel {
       params.push(dateTo);
     }
 
+    // Dept filter (multi-select)
+    if (deptIds && deptIds.length > 0) {
+      const placeholders = deptIds.map(() => '?').join(',');
+      query += ` AND dept_id IN (${placeholders})`;
+      params.push(...deptIds);
+    }
+
+    // Branch filter (multi-select)
+    if (branchIds && branchIds.length > 0) {
+      const placeholders = branchIds.map(() => '?').join(',');
+      query += ` AND branch_id IN (${placeholders})`;
+      params.push(...branchIds);
+    }
+
+    // Semester filter (multi-select)
+    if (semesters && semesters.length > 0) {
+      const placeholders = semesters.map(() => '?').join(',');
+      query += ` AND semester IN (${placeholders})`;
+      params.push(...semesters);
+    }
+
+    // Batch/Year filter (multi-select)
+    if (batches && batches.length > 0) {
+      const placeholders = batches.map(() => '?').join(',');
+      query += ` AND year_of_passing IN (${placeholders})`;
+      params.push(...batches);
+    }
+
     // Count total records
     // Count total records - build WHERE clause for count
     let countQuery = `SELECT COUNT(*) as total FROM ${database}.college_candidates WHERE organization_id = ?`;
@@ -217,13 +291,47 @@ class CandidateModel {
       countParams.push(dateTo);
     }
 
+    if (deptIds && deptIds.length > 0) {
+      const placeholders = deptIds.map(() => '?').join(',');
+      countQuery += ` AND dept_id IN (${placeholders})`;
+      countParams.push(...deptIds);
+    }
+    if (branchIds && branchIds.length > 0) {
+      const placeholders = branchIds.map(() => '?').join(',');
+      countQuery += ` AND branch_id IN (${placeholders})`;
+      countParams.push(...branchIds);
+    }
+    if (semesters && semesters.length > 0) {
+      const placeholders = semesters.map(() => '?').join(',');
+      countQuery += ` AND semester IN (${placeholders})`;
+      countParams.push(...semesters);
+    }
+    if (batches && batches.length > 0) {
+      const placeholders = batches.map(() => '?').join(',');
+      countQuery += ` AND year_of_passing IN (${placeholders})`;
+      countParams.push(...batches);
+    }
+
     // Sorting and pagination
-    query += ` ORDER BY ${safeSortBy} ${safeSortOrder} LIMIT ? OFFSET ?`;
+    let finalOrderBy = `${safeSortBy} ${safeSortOrder}`;
+    if (sortOrder === 'A-Z') {
+      finalOrderBy = `candidate_name ASC`;
+    } else if (sortOrder === 'NEWEST_TO_OLDEST') {
+      finalOrderBy = `created_at DESC`;
+    } else if (sortOrder === 'OLDEST_TO_NEWEST') {
+      finalOrderBy = `created_at ASC`;
+    }
+
+    query += ` ORDER BY ${finalOrderBy} LIMIT ? OFFSET ?`;
     params.push(pageSize, page * pageSize);
 
+    const logMsg = `[CandidateModel] getAllCandidates: db=${database}, q=${query.substring(0, 150)}, params=${JSON.stringify(params)}\n`;
+    fs.appendFileSync('./debug.log', logMsg);
     const countRows = await db.query(countQuery, countParams);
     const total = countRows[0]?.total || 0;
     const rows = await db.query(query, params);
+    fs.appendFileSync('./debug.log', `[CandidateModel] Found ${rows.length} rows, total=${total}\n`);
+    console.log(`[CandidateModel] getAllCandidates: Found ${rows.length} rows`);
     const data = rows.map((row) => {
       const skills = row.skills;
       let parsed = [];
@@ -246,13 +354,20 @@ class CandidateModel {
   }
 
   // Get student (college_candidates) counts by status for organization: All, Pending, Active, Inactive
-  static async getStudentCounts(organizationId, database = 'candidates_db') {
+  static async getStudentCounts(organizationId, createdBy = null, database = 'candidates_db') {
     if (!organizationId) throw new Error('organization_id is required');
-    const rows = await db.query(
-      `SELECT LOWER(COALESCE(NULLIF(TRIM(status), ''), 'all')) AS status, COUNT(*) AS count
-       FROM \`${database}\`.college_candidates WHERE organization_id = ? GROUP BY LOWER(COALESCE(NULLIF(TRIM(status), ''), 'all'))`,
-      [organizationId]
-    );
+    let query = `SELECT LOWER(COALESCE(NULLIF(TRIM(status), ''), 'all')) AS status, COUNT(*) AS count
+                 FROM \`${database}\`.college_candidates WHERE organization_id = ?`;
+    const params = [organizationId];
+
+    if (createdBy) {
+      query += ` AND candidate_created_by = ?`;
+      params.push(createdBy);
+    }
+
+    query += ` GROUP BY LOWER(COALESCE(NULLIF(TRIM(status), ''), 'all'))`;
+
+    const rows = await db.query(query, params);
     const list = Array.isArray(rows) ? rows : [];
     const total = list.reduce((sum, r) => sum + (r.count || 0), 0);
     const byStatus = {};
@@ -291,43 +406,341 @@ class CandidateModel {
 
     const tableCheck = await db.query(
       `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
-       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('position_candidates', 'candidate_positions')`,
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('position_candidates', 'candidate_positions', 'job_candidates', 'ats_candidates')`,
       [tenantDb]
     );
     const existingTables = (tableCheck || []).map((t) => t.TABLE_NAME);
 
     const usePositionCandidates = existingTables.includes('position_candidates');
     const useCandidatePositions = existingTables.includes('candidate_positions');
+    const useJobCandidates = existingTables.includes('job_candidates');
+    const useAtsCandidates = existingTables.includes('ats_candidates');
 
     const safeSortOrder = (sortOrder || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const safeSortBy = sortBy || 'created_at';
 
-    if (usePositionCandidates) {
-      return CandidateModel._getAllLinkedFromPositionCandidates(
-        filters,
-        tenantDb,
-        { page, pageSize, status, statuses, searchTerm, createdBy, sortBy, sortOrder: safeSortOrder, dateFrom, dateTo }
+    let results = { data: [], pagination: { page, pageSize, total: 0 } };
+    let totalElements = 0;
+
+    // Increase SQL limit for per-table fetch to allow JS-side merging and pagination to work reliably
+    const sqlPageSize = 1000; 
+
+    // 1. Fetch from ATS candidates if table exists
+    if (useAtsCandidates) {
+      const atsResults = await CandidateModel._getAllLinkedFromAtsCandidates(
+        { ...filters, pageSize: sqlPageSize, page: 0 }, 
+        tenantDb, 
+        { sortBy: safeSortBy, sortOrder: safeSortOrder }
       );
+      results.data = results.data.concat(atsResults.content || []);
+      totalElements += atsResults.totalElements || 0;
     }
 
-    if (useCandidatePositions) {
-      return CandidateModel._getAllLinkedFromCandidatePositions(
-        filters,
+    // 2. Fetch from legacy tables
+    const legacyFilters = { ...filters, pageSize: sqlPageSize, page: 0 };
+    if (useJobCandidates) {
+      const jobResults = await CandidateModel._getAllLinkedFromJobCandidates(
+        legacyFilters,
         tenantDb,
-        { page, pageSize, status, statuses, searchTerm, createdBy, sortBy, sortOrder: safeSortOrder, dateFrom, dateTo }
+        { sortBy: safeSortBy, sortOrder: safeSortOrder }
       );
+      results.data = results.data.concat(jobResults.data || jobResults.content || []);
+    } else if (usePositionCandidates) {
+      const posResults = await CandidateModel._getAllLinkedFromPositionCandidates(
+        legacyFilters,
+        tenantDb,
+        { sortBy: safeSortBy, sortOrder: safeSortOrder }
+      );
+      results.data = results.data.concat(posResults.data || posResults.content || []);
+    } else if (useCandidatePositions) {
+      const candResults = await CandidateModel._getAllLinkedFromCandidatePositions(
+        legacyFilters,
+        tenantDb,
+        { sortBy: safeSortBy, sortOrder: safeSortOrder }
+      );
+      results.data = results.data.concat(candResults.data || candResults.content || []);
     }
 
-    throw new Error(`Neither position_candidates nor candidate_positions table found in database ${tenantDb}`);
+    // Deduplicate by candidateEmail AND positionId if they came from multiple paths or belong to different roles
+    const uniqueMap = new Map();
+    results.data.forEach(item => {
+      const email = (item.candidateEmail || '').toLowerCase().trim();
+      const posId = (item.positionId || item.jobId || '').toLowerCase().trim();
+      const key = `${email}_${posId}`;
+
+      if (email && !uniqueMap.has(key)) {
+        uniqueMap.set(key, item);
+      } else if (!email) {
+        // Fallback to ID if email missing
+        const idKey = item.candidateId || item.id;
+        if (idKey && !uniqueMap.has(idKey)) uniqueMap.set(idKey, item);
+      }
+    });
+
+    let finalData = Array.from(uniqueMap.values());
+    
+    // Sort the combined results in JS
+    finalData.sort((a, b) => {
+      const dateA = new Date(a.candidateCreatedAt || a.createdAt || 0);
+      const dateB = new Date(b.candidateCreatedAt || b.createdAt || 0);
+      return safeSortOrder === 'DESC' ? dateB - dateA : dateA - dateB;
+    });
+
+    // Simple pagination over the combined set
+    const startIndex = page * pageSize;
+    const paginatedData = finalData.slice(startIndex, startIndex + pageSize);
+
+    return {
+      success: true,
+      content: paginatedData,
+      page,
+      size: pageSize,
+      totalElements: finalData.length,
+      totalPages: Math.ceil(finalData.length / pageSize),
+      last: startIndex + pageSize >= finalData.length
+    };
+  }
+
+  static async _getAllLinkedFromAtsCandidates(filters, tenantDb, opts) {
+    const { organizationId, page = 0, pageSize = 10, searchTerm, positionId, status, statuses = [] } = filters;
+    const { sortBy, sortOrder } = opts;
+
+    let whereClause = 'WHERE ac.organization_id = UNHEX(?)';
+    const params = [String(organizationId).replace(/-/g, '')];
+
+    if (searchTerm) {
+      whereClause += ' AND (ac.name LIKE ? OR ac.email LIKE ? OR ac.candidate_code LIKE ?)';
+      const pattern = `%${searchTerm}%`;
+      params.push(pattern, pattern, pattern);
+    }
+
+    if (positionId) {
+      whereClause += ' AND ac.job_id = UNHEX(?)';
+      params.push(String(positionId).replace(/-/g, ''));
+    }
+
+    if (status && String(status).toUpperCase() !== 'ALL') {
+      whereClause += ' AND ac.stage = ?';
+      params.push(status);
+    } else if (statuses && statuses.length > 0) {
+      const valid = statuses.filter(s => s && String(s).toUpperCase() !== 'ALL');
+      if (valid.length > 0) {
+        whereClause += ` AND ac.stage IN (${valid.map(() => '?').join(',')})`;
+        params.push(...valid);
+      }
+    }
+
+    const countQuery = `SELECT COUNT(*) as total FROM \`${tenantDb}\`.ats_candidates ac ${whereClause}`;
+    const countRes = await db.query(countQuery, params);
+    const totalElements = countRes[0]?.total || 0;
+
+    const selectQuery = `
+      SELECT 
+        LOWER(BIN_TO_UUID(ac.id)) as positionCandidateId,
+        LOWER(BIN_TO_UUID(ac.id)) as candidateId,
+        LOWER(BIN_TO_UUID(ac.job_id)) as positionId,
+        ac.candidate_code as candidateCode,
+        ac.name as candidateName,
+        ac.created_at as candidateCreatedAt,
+        ac.email as candidateEmail,
+        ac.mobile_number as candidateMobileNumber,
+        ac.resume_filename as resumeFilename,
+        ac.resume_url as resumeStoragePath,
+        j.job_title as positionTitle,
+        j.job_title as jobTitle,
+        'ATS' as domainType,
+        j.experience_min as minimumExperience,
+        j.experience_max as maximumExperience,
+        ac.created_at as linkActiveAt,
+        NULL as linkExpiresAt,
+        NULL as interviewCompletedAt,
+        ac.resume_score as resumeMatchScore,
+        ac.stage as recommendationStatus,
+        NULL as recordingLink,
+        NULL as questionSetId,
+        NULL as questionSetDuration,
+        NULL as questionSetCode,
+        NULL as questionSetTitle,
+        NULL as candidateCreatedBy,
+        ac.created_at as updatedAt
+      FROM \`${tenantDb}\`.ats_candidates ac
+      LEFT JOIN \`${tenantDb}\`.jobs j ON ac.job_id = j.id
+      ${whereClause.replace(/organization_id/g, 'ac.organization_id').replace(/name/g, 'ac.name').replace(/email/g, 'ac.email').replace(/candidate_code/g, 'ac.candidate_code').replace(/job_id/g, 'ac.job_id')}
+      ORDER BY ac.created_at ${sortOrder}
+      LIMIT ? OFFSET ?
+    `;
+
+    const data = await db.query(selectQuery, [...params, parseInt(pageSize), parseInt(page) * parseInt(pageSize)]);
+
+    return {
+      content: data,
+      totalElements
+    };
+  }
+
+  static async _getAllLinkedFromJobCandidates(filters, tenantDb, opts) {
+    const { organizationId, page = 0, pageSize = 10, status, statuses = [], searchTerm, createdBy, dateFrom, dateTo, positionId } = filters;
+    const { sortBy, sortOrder } = opts;
+
+    const tableCheck = await db.query(
+      `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('candidates', 'college_candidates')`,
+      [tenantDb]
+    );
+    const tenantTables = (tableCheck || []).map(t => t.TABLE_NAME);
+    const hasCandidatesTable = tenantTables.includes('candidates');
+    const hasCollegeCandidatesLocal = tenantTables.includes('college_candidates');
+    const profileDb = hasCollegeCandidatesLocal ? tenantDb : 'candidates_db';
+    const sharedDb = 'candidates_db';
+
+    const sortFieldMapping = {
+      'created_at': 'jc.created_at',
+      'candidateCreatedAt': 'jc.created_at',
+      'updated_at': 'jc.updated_at',
+      'updatedAt': 'jc.updated_at',
+      'candidate_name': hasCandidatesTable ? 'COALESCE(tc.name, cc.candidate_name)' : 'cc.candidate_name',
+      'candidateName': hasCandidatesTable ? 'COALESCE(tc.name, cc.candidate_name)' : 'cc.candidate_name',
+      'candidate_code': hasCandidatesTable ? 'COALESCE(tc.code, cc.candidate_code)' : 'cc.candidate_code',
+      'candidateCode': hasCandidatesTable ? 'COALESCE(tc.code, cc.candidate_code)' : 'cc.candidate_code',
+      'status': 'jc.recommendation',
+      'recommendationStatus': 'jc.recommendation',
+      'resume_score': 'jc.resume_match_score',
+      'resumeMatchScore': 'jc.resume_match_score'
+    };
+    const safeSortBy = sortFieldMapping[sortBy] || 'jc.created_at';
+
+    let baseWhere = hasCandidatesTable ? 'WHERE (tc.organization_id = ? OR cc.organization_id = ?)' : 'WHERE cc.organization_id = ?';
+    const baseParams = [organizationId];
+    if (hasCandidatesTable) baseParams.push(organizationId);
+
+    if (status && String(status).toUpperCase() !== 'ALL') {
+      baseWhere += ' AND jc.recommendation = ?';
+      baseParams.push(status);
+    }
+
+    if (createdBy) {
+      baseWhere += hasCandidatesTable ? ' AND (cc.candidate_created_by = ? OR tc.created_by = ?)' : ' AND cc.candidate_created_by = ?';
+      baseParams.push(createdBy);
+      if (hasCandidatesTable) baseParams.push(createdBy);
+    }
+
+    const searchCols = hasCandidatesTable
+      ? '(COALESCE(tc.name, cc.candidate_name) LIKE ? OR COALESCE(tc.email, cc.email) LIKE ? OR COALESCE(tc.code, cc.candidate_code) LIKE ? OR j.job_title LIKE ?)'
+      : '(cc.candidate_name LIKE ? OR cc.email LIKE ? OR cc.candidate_code LIKE ? OR j.job_title LIKE ?)';
+    if (searchTerm) {
+      baseWhere += ` AND ${searchCols}`;
+      const searchPattern = `%${searchTerm}%`;
+      baseParams.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+    }
+
+    if (dateFrom) {
+      baseWhere += ' AND jc.created_at >= ?';
+      baseParams.push(dateFrom);
+    }
+    if (dateTo) {
+      baseWhere += ' AND jc.created_at <= ?';
+      baseParams.push(dateTo);
+    }
+
+    if (positionId) {
+      baseWhere += ' AND jc.job_id = UNHEX(?)';
+      baseParams.push(String(positionId).replace(/-/g, ''));
+    }
+
+    const candidateSelect = hasCandidatesTable
+      ? `COALESCE(tc.code, cc.candidate_code) as candidateCode,
+         COALESCE(tc.name, cc.candidate_name) as candidateName,
+         COALESCE(tc.created_at, cc.candidate_created_at, cc.created_at, jc.created_at) as candidateCreatedAt,
+         COALESCE(tc.email, cc.email) as candidateEmail,
+         COALESCE(tc.mobile_number, cc.mobile_number) as candidateMobileNumber,
+         COALESCE(tc.resume_filename, cc.resume_filename) as resumeFilename,
+         COALESCE(tc.resume_storage_path, REPLACE(cc.resume_url, '/uploads/resumes/', ''), cc.resume_url) as resumeStoragePath`
+      : `cc.candidate_code as candidateCode,
+         cc.candidate_name as candidateName,
+         COALESCE(cc.candidate_created_at, cc.created_at, jc.created_at) as candidateCreatedAt,
+         cc.email as candidateEmail,
+         cc.mobile_number as candidateMobileNumber,
+         cc.resume_filename as resumeFilename,
+         COALESCE(REPLACE(cc.resume_url, '/uploads/resumes/', ''), cc.resume_url) as resumeStoragePath`;
+
+    const candidateJoin = hasCandidatesTable
+      ? `LEFT JOIN \`${tenantDb}\`.candidates tc ON tc.id = jc.candidate_id
+         LEFT JOIN \`${profileDb}\`.college_candidates cc ON (LOWER(BIN_TO_UUID(jc.candidate_id)) = cc.candidate_id)`
+      : `LEFT JOIN \`${profileDb}\`.college_candidates cc ON (LOWER(BIN_TO_UUID(jc.candidate_id)) = cc.candidate_id)`;
+
+    const selectQuery = `
+      SELECT 
+        LOWER(BIN_TO_UUID(jc.id)) as positionCandidateId,
+        LOWER(BIN_TO_UUID(jc.candidate_id)) as candidateId,
+        LOWER(BIN_TO_UUID(jc.job_id)) as positionId,
+        ${candidateSelect},
+        j.job_title as positionTitle,
+        j.job_title as jobTitle,
+        j.job_type as domainType,
+        j.experience_min as minimumExperience,
+        j.experience_max as maximumExperience,
+        jc.link_active_at as linkActiveAt,
+        jc.link_expires_at as linkExpiresAt,
+        jc.interview_completed_at as interviewCompletedAt,
+        jc.resume_match_score as resumeMatchScore,
+        jc.recommendation as recommendationStatus,
+        jc.recording_link as recordingLink,
+        LOWER(BIN_TO_UUID(jc.question_set_id)) as questionSetId,
+        qs.total_duration as questionSetDuration,
+        qs.question_set_code as questionSetCode,
+        qs.question_set_title as questionSetTitle,
+        LOWER(BIN_TO_UUID(jc.interview_scheduled_by)) as candidateCreatedBy,
+        jc.created_at as updatedAt
+      FROM \`${tenantDb}\`.job_candidates jc
+      LEFT JOIN \`${tenantDb}\`.jobs j ON j.id = jc.job_id
+      LEFT JOIN \`${tenantDb}\`.question_sets qs ON qs.id = jc.question_set_id
+      LEFT JOIN \`${sharedDb}\`.private_link pl ON (pl.candidate_id = BIN_TO_UUID(jc.candidate_id) AND pl.position_id = BIN_TO_UUID(jc.job_id))
+      ${candidateJoin}
+      ${baseWhere}
+      ORDER BY ${safeSortBy} ${sortOrder}
+      LIMIT ? OFFSET ?
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*) as total 
+      FROM \`${tenantDb}\`.job_candidates jc
+      LEFT JOIN \`${tenantDb}\`.jobs j ON j.id = jc.job_id
+      ${candidateJoin}
+      ${baseWhere}
+    `;
+
+    const countRows = await db.query(countQuery, baseParams);
+    const total = countRows[0]?.total || 0;
+    const selectParams = [...baseParams, parseInt(pageSize, 10), parseInt(page * pageSize, 10)];
+    const rows = await db.query(selectQuery, selectParams);
+
+    return {
+      data: rows,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.ceil(total / pageSize),
+        hasNextPage: page < Math.ceil(total / pageSize) - 1,
+        hasPreviousPage: page > 0
+      }
+    };
   }
 
   static async _getAllLinkedFromPositionCandidates(filters, tenantDb, opts) {
-    const { organizationId, page = 0, pageSize = 10, status, statuses = [], searchTerm, createdBy, dateFrom, dateTo } = filters;
+    const { organizationId, page = 0, pageSize = 10, status, statuses = [], searchTerm, createdBy, dateFrom, dateTo, positionId } = filters;
     const { sortBy, sortOrder } = opts;
 
-    const hasCandidatesTable = await db.query(
-      `SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'candidates'`,
+    const tableCheck = await db.query(
+      `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('college_candidates', 'candidates')`,
       [tenantDb]
-    ).then((r) => r && r.length > 0).catch(() => false);
+    );
+    const tenantTables = (tableCheck || []).map(t => t.TABLE_NAME);
+    const hasCandidatesTable = tenantTables.includes('candidates');
+    const hasCollegeCandidatesLocal = tenantTables.includes('college_candidates');
+    const profileDb = hasCollegeCandidatesLocal ? tenantDb : 'candidates_db';
+    const sharedDb = 'candidates_db';
 
     const sortFieldMapping = {
       'created_at': 'pc.created_at',
@@ -345,8 +758,8 @@ class CandidateModel {
     };
     const safeSortBy = sortFieldMapping[sortBy] || 'pc.created_at';
 
-    let baseWhere = 'WHERE 1=1';
-    const baseParams = [];
+    let baseWhere = hasCandidatesTable ? 'WHERE cc.organization_id = ?' : 'WHERE c.organization_id = ?';
+    const baseParams = [organizationId];
 
     if (status && String(status).toUpperCase() !== 'ALL') {
       baseWhere += ' AND pc.recommendation = ?';
@@ -359,7 +772,6 @@ class CandidateModel {
       }
     }
 
-    const candidatesDb = 'candidates_db';
     if (createdBy) {
       baseWhere += hasCandidatesTable ? ' AND (cc.candidate_created_by = ? OR tc.created_by = ?)' : ' AND c.candidate_created_by = ?';
       baseParams.push(createdBy);
@@ -384,6 +796,11 @@ class CandidateModel {
       baseParams.push(dateTo);
     }
 
+    if (positionId) {
+      baseWhere += ' AND pc.position_id = UNHEX(?)';
+      baseParams.push(String(positionId).replace(/-/g, ''));
+    }
+
     const candidateSelect = hasCandidatesTable
       ? `CASE WHEN COALESCE(cc.candidate_code, tc.code) REGEXP '^CAN[0-9]' THEN COALESCE(cc.candidate_code, tc.code) WHEN COALESCE(cc.candidate_code, tc.code) LIKE '#%' THEN COALESCE(cc.candidate_code, tc.code) ELSE CONCAT('#', IFNULL(COALESCE(cc.candidate_code, tc.code), '')) END as candidateCode,
         COALESCE(cc.candidate_name, tc.name) as candidateName,
@@ -402,8 +819,8 @@ class CandidateModel {
 
     const candidateJoin = hasCandidatesTable
       ? `LEFT JOIN \`${tenantDb}\`.candidates tc ON tc.id = pc.candidate_id
-       LEFT JOIN \`${candidatesDb}\`.college_candidates cc ON (LOWER(BIN_TO_UUID(pc.candidate_id)) = cc.candidate_id OR (LOWER(BIN_TO_UUID(pc.candidate_id, 1)) = cc.candidate_id) OR (REPLACE(cc.candidate_id, '-', '') = REPLACE(LOWER(BIN_TO_UUID(pc.candidate_id)), '-', '')))`
-      : `LEFT JOIN \`${candidatesDb}\`.college_candidates c ON (LOWER(BIN_TO_UUID(pc.candidate_id)) = c.candidate_id OR LOWER(BIN_TO_UUID(pc.candidate_id, 1)) = c.candidate_id OR REPLACE(c.candidate_id, '-', '') = REPLACE(LOWER(BIN_TO_UUID(pc.candidate_id)), '-', ''))`;
+         LEFT JOIN \`${profileDb}\`.college_candidates cc ON (LOWER(BIN_TO_UUID(pc.candidate_id)) = cc.candidate_id)`
+      : `LEFT JOIN \`${profileDb}\`.college_candidates c ON (LOWER(BIN_TO_UUID(pc.candidate_id)) = c.candidate_id)`;
 
     const selectQuery = `
       SELECT 
@@ -424,13 +841,14 @@ class CandidateModel {
         LOWER(BIN_TO_UUID(pc.question_set_id)) as questionSetId,
         qs.total_duration as questionSetDuration,
         qs.question_set_code as questionSetCode,
-        qs.question_set_code as questionSetTitle,
+        qs.question_set_title as questionSetTitle,
         LOWER(BIN_TO_UUID(pc.interview_scheduled_by)) as candidateCreatedBy,
-        pc.created_at as updatedAt
+        pc.created_at as updatedAt,
+        pl.verification_code as verificationCode
       FROM \`${tenantDb}\`.position_candidates pc
-      ${candidateJoin}
       LEFT JOIN \`${tenantDb}\`.positions p ON p.id = pc.position_id
-      LEFT JOIN \`${tenantDb}\`.question_sets qs ON qs.id = pc.question_set_id
+      LEFT JOIN \`${sharedDb}\`.private_link pl ON (pl.candidate_id = BIN_TO_UUID(pc.candidate_id) AND pl.position_id = BIN_TO_UUID(pc.position_id))
+      ${candidateJoin}
       ${baseWhere}
       ORDER BY ${safeSortBy} ${sortOrder}
       LIMIT ? OFFSET ?
@@ -439,8 +857,8 @@ class CandidateModel {
     const countQuery = `
       SELECT COUNT(*) as total 
       FROM \`${tenantDb}\`.position_candidates pc
-      ${candidateJoin}
       LEFT JOIN \`${tenantDb}\`.positions p ON p.id = pc.position_id
+      ${candidateJoin}
       ${baseWhere}
     `;
 
@@ -463,8 +881,18 @@ class CandidateModel {
   }
 
   static async _getAllLinkedFromCandidatePositions(filters, tenantDb, opts) {
-    const { organizationId, page = 0, pageSize = 10, status, statuses = [], searchTerm, createdBy, dateFrom, dateTo } = filters;
+    const { organizationId, page = 0, pageSize = 10, status, statuses = [], searchTerm, createdBy, dateFrom, dateTo, positionId } = filters;
     const { sortBy, sortOrder } = opts;
+
+    const tableCheck = await db.query(
+      `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('college_candidates', 'positions', 'question_sets')`,
+      [tenantDb]
+    );
+    const tenantTables = (tableCheck || []).map(t => t.TABLE_NAME);
+    const hasCollegeCandidatesLocal = tenantTables.includes('college_candidates');
+    const profileDb = hasCollegeCandidatesLocal ? tenantDb : 'candidates_db';
+    const sharedDb = 'candidates_db';
 
     const sortFieldMapping = {
       'created_at': 'cp.created_at',
@@ -477,8 +905,8 @@ class CandidateModel {
       'jobTitle': 'cp.job_title',
       'candidate_code': 'cp.candidate_code',
       'candidateCode': 'cp.candidate_code',
-      'status': 'cp.status',
-      'recommendationStatus': 'cp.status',
+      'status': 'COALESCE(cp.recommendation_status, cp.status)',
+      'recommendationStatus': 'COALESCE(cp.recommendation_status, cp.status)',
       'resume_score': 'cp.resume_score',
       'resumeMatchScore': 'cp.resume_score'
     };
@@ -487,13 +915,15 @@ class CandidateModel {
     let baseWhere = 'WHERE cp.organization_id = ?';
     const baseParams = [organizationId];
 
+    const statusExpr = 'COALESCE(cp.recommendation_status, cp.status)';
+
     if (status && String(status).toUpperCase() !== 'ALL') {
-      baseWhere += ' AND cp.status = ?';
+      baseWhere += ` AND ${statusExpr} = ?`;
       baseParams.push(status);
     } else if (statuses && statuses.length > 0) {
       const valid = statuses.filter(s => s && String(s).toUpperCase() !== 'ALL');
       if (valid.length > 0) {
-        baseWhere += ` AND cp.status IN (${valid.map(() => '?').join(',')})`;
+        baseWhere += ` AND ${statusExpr} IN (${valid.map(() => '?').join(',')})`;
         baseParams.push(...valid);
       }
     }
@@ -518,7 +948,11 @@ class CandidateModel {
       baseParams.push(dateTo);
     }
 
-    const candidatesDb = 'candidates_db';
+    if (positionId) {
+      baseWhere += ' AND cp.position_id = ?';
+      baseParams.push(positionId);
+    }
+
     const selectQuery = `
       SELECT 
         cp.position_candidate_id as positionCandidateId,
@@ -556,11 +990,13 @@ class CandidateModel {
         COALESCE(REPLACE(c.resume_url, '/uploads/resumes/', ''), c.resume_url) as resumeStoragePath,
         p.title as positionTitle,
         qs.question_set_code as questionSetCode,
-        qs.question_set_code as questionSetTitle
+        qs.question_set_code as questionSetTitle,
+        pl.verification_code as verificationCode
       FROM \`${tenantDb}\`.candidate_positions cp
-      LEFT JOIN \`${candidatesDb}\`.college_candidates c ON (LOWER(TRIM(c.candidate_id)) = LOWER(TRIM(cp.candidate_id)) OR REPLACE(c.candidate_id, '-', '') = REPLACE(cp.candidate_id, '-', ''))
+      LEFT JOIN \`${profileDb}\`.college_candidates c ON (LOWER(TRIM(c.candidate_id)) = LOWER(TRIM(cp.candidate_id)))
       LEFT JOIN \`${tenantDb}\`.positions p ON (p.id = UNHEX(REPLACE(LOWER(TRIM(cp.position_id)), '-', '')) OR BIN_TO_UUID(p.id) = cp.position_id)
       LEFT JOIN \`${tenantDb}\`.question_sets qs ON (qs.id = UNHEX(REPLACE(LOWER(TRIM(cp.question_set_id)), '-', '')) OR BIN_TO_UUID(qs.id) = cp.question_set_id)
+      LEFT JOIN \`${sharedDb}\`.private_link pl ON (pl.candidate_id = cp.candidate_id AND pl.position_id = cp.position_id)
       ${baseWhere}
       ORDER BY ${safeSortBy} ${sortOrder}
       LIMIT ? OFFSET ?
@@ -569,7 +1005,7 @@ class CandidateModel {
     const countQuery = `
       SELECT COUNT(*) as total 
       FROM \`${tenantDb}\`.candidate_positions cp
-      LEFT JOIN \`${candidatesDb}\`.college_candidates c ON (LOWER(TRIM(c.candidate_id)) = LOWER(TRIM(cp.candidate_id)) OR REPLACE(c.candidate_id, '-', '') = REPLACE(cp.candidate_id, '-', ''))
+      LEFT JOIN \`${profileDb}\`.college_candidates c ON (LOWER(TRIM(c.candidate_id)) = LOWER(TRIM(cp.candidate_id)))
       LEFT JOIN \`${tenantDb}\`.positions p ON (p.id = UNHEX(REPLACE(LOWER(TRIM(cp.position_id)), '-', '')) OR BIN_TO_UUID(p.id) = cp.position_id)
       LEFT JOIN \`${tenantDb}\`.question_sets qs ON (qs.id = UNHEX(REPLACE(LOWER(TRIM(cp.question_set_id)), '-', '')) OR BIN_TO_UUID(qs.id) = cp.question_set_id)
       ${baseWhere}
@@ -600,7 +1036,8 @@ class CandidateModel {
       searchTerm,
       createdBy,
       dateFrom,
-      dateTo
+      dateTo,
+      positionId
     } = filters || {};
 
     if (!tenantDb) {
@@ -609,41 +1046,48 @@ class CandidateModel {
 
     const tableCheck = await db.query(
       `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
-       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('position_candidates', 'candidate_positions')`,
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('position_candidates', 'candidate_positions', 'job_candidates', 'ats_candidates', 'jobs', 'positions', 'candidates')`,
       [tenantDb]
     );
-    const existingTables = (tableCheck || []).map((t) => t.TABLE_NAME);
-    const usePositionCandidates = existingTables.includes('position_candidates');
-    const useCandidatePositions = existingTables.includes('candidate_positions');
+    const tables = (tableCheck || []).map((t) => t.TABLE_NAME);
+    const usePositionCandidates = tables.includes('position_candidates');
+    const useCandidatePositions = tables.includes('candidate_positions');
+    const useJobCandidates = tables.includes('job_candidates');
+    const useAtsCandidates = tables.includes('ats_candidates');
+    const jobTable = tables.includes('jobs') ? 'jobs' : 'positions';
+    const jobFk = tables.includes('jobs') ? 'job_id' : 'position_id';
+    const hasCandidatesTable = tables.includes('candidates');
+    const candidatesDb = 'candidates_db';
 
     const counts = {};
     Object.values(CANDIDATE_STATUSES).forEach(status => {
-      counts[status] = 0;
+      counts[status.toUpperCase()] = 0;
     });
 
     if (useCandidatePositions) {
-      if (!organizationId) {
-        throw new Error('organization_id is required for link-based status counts');
-      }
-      const candidatesDb = 'candidates_db';
+      if (!organizationId) throw new Error('organization_id is required');
       let baseWhere = 'WHERE cp.organization_id = ?';
       const baseParams = [organizationId];
 
+      if (positionId) {
+        baseWhere += ' AND cp.position_id = ?';
+        baseParams.push(positionId);
+      }
       if (createdBy) {
         baseWhere += ' AND cp.created_by = ?';
         baseParams.push(createdBy);
       }
       if (searchTerm) {
-        baseWhere += ` AND (COALESCE(cp.candidate_name, c.candidate_name) LIKE ? OR c.email LIKE ? OR COALESCE(cp.candidate_code, c.candidate_code) LIKE ? OR cp.job_title LIKE ? OR p.title LIKE ?)`;
+        baseWhere += ' AND (cp.candidate_name LIKE ? OR cp.candidate_code LIKE ? OR cp.job_title LIKE ?)';
         const searchPattern = `%${searchTerm}%`;
-        baseParams.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        baseParams.push(searchPattern, searchPattern, searchPattern);
       }
       if (dateFrom) {
-        baseWhere += ' AND cp.created_at >= ?';
+        baseWhere += ' AND cp.invited_date >= ?';
         baseParams.push(dateFrom);
       }
       if (dateTo) {
-        baseWhere += ' AND cp.created_at <= ?';
+        baseWhere += ' AND cp.invited_date <= ?';
         baseParams.push(dateTo);
       }
 
@@ -651,18 +1095,10 @@ class CandidateModel {
       const countByStatusQuery = `
         SELECT ${groupBy} as status, COUNT(*) as count
         FROM \`${tenantDb}\`.candidate_positions cp
-        LEFT JOIN \`${candidatesDb}\`.college_candidates c ON (LOWER(TRIM(c.candidate_id)) = LOWER(TRIM(cp.candidate_id)) OR REPLACE(c.candidate_id, '-', '') = REPLACE(cp.candidate_id, '-', ''))
-        LEFT JOIN \`${tenantDb}\`.positions p ON (p.id = UNHEX(REPLACE(LOWER(TRIM(cp.position_id)), '-', '')) OR BIN_TO_UUID(p.id) = cp.position_id)
         ${baseWhere}
         GROUP BY ${groupBy}
       `;
-      const totalQuery = `
-        SELECT COUNT(*) as total
-        FROM \`${tenantDb}\`.candidate_positions cp
-        LEFT JOIN \`${candidatesDb}\`.college_candidates c ON (LOWER(TRIM(c.candidate_id)) = LOWER(TRIM(cp.candidate_id)) OR REPLACE(c.candidate_id, '-', '') = REPLACE(cp.candidate_id, '-', ''))
-        LEFT JOIN \`${tenantDb}\`.positions p ON (p.id = UNHEX(REPLACE(LOWER(TRIM(cp.position_id)), '-', '')) OR BIN_TO_UUID(p.id) = cp.position_id)
-        ${baseWhere}
-      `;
+      const totalQuery = `SELECT COUNT(*) as total FROM \`${tenantDb}\`.candidate_positions cp ${baseWhere}`;
 
       const [rows, totalRows] = await Promise.all([
         db.query(countByStatusQuery, baseParams),
@@ -670,69 +1106,72 @@ class CandidateModel {
       ]);
       let total = parseInt(totalRows[0]?.total, 10) || 0;
       (rows || []).forEach((row) => {
-        const raw = (row.status && String(row.status).trim()) || 'ALL';
-        const status = raw.toUpperCase();
-        const count = parseInt(row.count, 10) || 0;
-        if (Object.prototype.hasOwnProperty.call(counts, status)) {
-          counts[status] = count;
-        } else {
-          counts[status] = count;
-        }
+        const status = (row.status || 'ALL').toUpperCase();
+        counts[status] = parseInt(row.count, 10) || 0;
       });
       counts.All = total;
       return counts;
     }
 
-    if (usePositionCandidates) {
-      const candidatesDb = 'candidates_db';
-      const hasCandidatesTable = await db.query(
-        `SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'candidates'`,
-        [tenantDb]
-      ).then((r) => r && r.length > 0).catch(() => false);
-
+    if (usePositionCandidates || useJobCandidates) {
+      const junctionTable = useJobCandidates ? 'job_candidates' : 'position_candidates';
       let baseWhere = 'WHERE 1=1';
       const baseParams = [];
 
+      if (organizationId) {
+        baseWhere += hasCandidatesTable ? ' AND (tc.organization_id = ? OR cc.organization_id = ?)' : ' AND cc.organization_id = ?';
+        baseParams.push(organizationId);
+        if (hasCandidatesTable) baseParams.push(organizationId);
+      }
+
+      if (positionId) {
+        baseWhere += ` AND jc.${jobFk} = UNHEX(?)`;
+        baseParams.push(String(positionId).replace(/-/g, ''));
+      }
+
       if (createdBy) {
-        baseWhere += hasCandidatesTable ? ' AND (cc.candidate_created_by = ? OR tc.created_by = ?)' : ' AND c.candidate_created_by = ?';
+        baseWhere += hasCandidatesTable ? ` AND (cc.candidate_created_by = ? OR tc.created_by = ?)` : ' AND cc.candidate_created_by = ?';
         baseParams.push(createdBy);
         if (hasCandidatesTable) baseParams.push(createdBy);
       }
+      
+      const titleCol = jobTable === 'jobs' ? 'job_title' : 'title';
       const searchCols = hasCandidatesTable
-        ? '(COALESCE(cc.candidate_name, tc.name) LIKE ? OR COALESCE(cc.email, tc.email) LIKE ? OR COALESCE(cc.candidate_code, tc.code) LIKE ? OR p.title LIKE ?)'
-        : '(c.candidate_name LIKE ? OR c.email LIKE ? OR c.candidate_code LIKE ? OR p.title LIKE ?)';
+        ? `(COALESCE(tc.name, cc.candidate_name) LIKE ? OR COALESCE(tc.email, cc.email) LIKE ? OR COALESCE(tc.code, cc.candidate_code) LIKE ? OR j.\`${titleCol}\` LIKE ?)`
+        : `(cc.candidate_name LIKE ? OR cc.email LIKE ? OR cc.candidate_code LIKE ? OR j.\`${titleCol}\` LIKE ?)`;
+      
       if (searchTerm) {
         baseWhere += ` AND ${searchCols}`;
         const searchPattern = `%${searchTerm}%`;
         baseParams.push(searchPattern, searchPattern, searchPattern, searchPattern);
       }
       if (dateFrom) {
-        baseWhere += ' AND pc.created_at >= ?';
+        baseWhere += ` AND jc.created_at >= ?`;
         baseParams.push(dateFrom);
       }
       if (dateTo) {
-        baseWhere += ' AND pc.created_at <= ?';
+        baseWhere += ` AND jc.created_at <= ?`;
         baseParams.push(dateTo);
       }
 
       const candidateJoin = hasCandidatesTable
-        ? `LEFT JOIN \`${tenantDb}\`.candidates tc ON tc.id = pc.candidate_id
-          LEFT JOIN \`${candidatesDb}\`.college_candidates cc ON (LOWER(BIN_TO_UUID(pc.candidate_id)) = cc.candidate_id OR (LOWER(BIN_TO_UUID(pc.candidate_id, 1)) = cc.candidate_id) OR (REPLACE(cc.candidate_id, '-', '') = REPLACE(LOWER(BIN_TO_UUID(pc.candidate_id)), '-', '')))`
-        : `LEFT JOIN \`${candidatesDb}\`.college_candidates c ON (LOWER(BIN_TO_UUID(pc.candidate_id)) = c.candidate_id OR LOWER(BIN_TO_UUID(pc.candidate_id, 1)) = c.candidate_id OR REPLACE(c.candidate_id, '-', '') = REPLACE(LOWER(BIN_TO_UUID(pc.candidate_id)), '-', ''))`;
+        ? `LEFT JOIN \`${tenantDb}\`.candidates tc ON tc.id = jc.candidate_id
+           LEFT JOIN \`${candidatesDb}\`.college_candidates cc ON (LOWER(BIN_TO_UUID(jc.candidate_id)) = cc.candidate_id)`
+        : `LEFT JOIN \`${candidatesDb}\`.college_candidates cc ON (LOWER(BIN_TO_UUID(jc.candidate_id)) = cc.candidate_id)`;
 
       const countByStatusQuery = `
-        SELECT pc.recommendation as status, COUNT(*) as count
-        FROM \`${tenantDb}\`.position_candidates pc
+        SELECT jc.recommendation as status, COUNT(*) as count
+        FROM \`${tenantDb}\`.\`${junctionTable}\` jc
         ${candidateJoin}
-        LEFT JOIN \`${tenantDb}\`.positions p ON p.id = pc.position_id
+        LEFT JOIN \`${tenantDb}\`.\`${jobTable}\` j ON j.id = jc.\`${jobFk}\`
         ${baseWhere}
-        GROUP BY pc.recommendation
+        GROUP BY jc.recommendation
       `;
       const totalQuery = `
         SELECT COUNT(*) as total
-        FROM \`${tenantDb}\`.position_candidates pc
+        FROM \`${tenantDb}\`.\`${junctionTable}\` jc
         ${candidateJoin}
-        LEFT JOIN \`${tenantDb}\`.positions p ON p.id = pc.position_id
+        LEFT JOIN \`${tenantDb}\`.\`${jobTable}\` j ON j.id = jc.\`${jobFk}\`
         ${baseWhere}
       `;
 
@@ -744,59 +1183,102 @@ class CandidateModel {
       (rows || []).forEach((row) => {
         const raw = (row.status && String(row.status).trim()) || 'ALL';
         const status = raw.toUpperCase();
-        const count = parseInt(row.count, 10) || 0;
-        if (Object.prototype.hasOwnProperty.call(counts, status)) {
-          counts[status] = count;
-        } else {
-          counts[status] = count;
-        }
+        counts[status] = parseInt(row.count, 10) || 0;
       });
       counts.All = total;
-      return counts;
     }
 
-    throw new Error(`Neither position_candidates nor candidate_positions found in database ${tenantDb}`);
+    if (useAtsCandidates) {
+      if (!organizationId) throw new Error('organization_id is required');
+      let whereClause = 'WHERE organization_id = UNHEX(?)';
+      const params = [String(organizationId).replace(/-/g, '')];
+
+      if (positionId) {
+        whereClause += ' AND job_id = UNHEX(?)';
+        params.push(String(positionId).replace(/-/g, ''));
+      }
+
+      if (searchTerm) {
+        whereClause += ' AND (name LIKE ? OR email LIKE ? OR candidate_code LIKE ?)';
+        const pattern = `%${searchTerm}%`;
+        params.push(pattern, pattern, pattern);
+      }
+
+      const atsCountsQuery = `
+        SELECT stage as status, COUNT(*) as count 
+        FROM \`${tenantDb}\`.ats_candidates 
+        ${whereClause} 
+        GROUP BY stage
+      `;
+      const atsTotalQuery = `SELECT COUNT(*) as total FROM \`${tenantDb}\`.ats_candidates ${whereClause}`;
+
+      const [atsRows, atsTotalRows] = await Promise.all([
+        db.query(atsCountsQuery, params),
+        db.query(atsTotalQuery, params)
+      ]);
+
+      (atsRows || []).forEach(row => {
+        const rawStatus = (row.status || 'Active').toUpperCase();
+        counts[rawStatus] = (counts[rawStatus] || 0) + (parseInt(row.count, 10) || 0);
+      });
+      counts.All = (counts.All || 0) + (parseInt(atsTotalRows[0]?.total, 10) || 0);
+    }
+
+    return counts;
   }
 
-  // Update candidate
-  static async updateCandidate(candidateId, organizationId, updateData, database = 'candidates_db') {
-    const updatedAt = new Date();
+  // Update candidate details (shared or tenant-specific)
+  static async updateCandidate(candidateId, organizationId, candidateData, contextDb = 'candidates_db') {
+    let targetDb = contextDb;
+    if (contextDb !== 'candidates_db') {
+      const tableCheck = await db.query(
+        `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'college_candidates'`,
+        [contextDb]
+      );
+      if (!tableCheck || tableCheck.length === 0) {
+        targetDb = 'candidates_db';
+      }
+    }
+    const database = targetDb;
+
+    const fields = [];
+    const values = [];
     const allowedFields = [
-      'candidate_name', 'department', 'semester',
+      'candidate_name', 'department', 'semester', 'year_of_passing',
       'email', 'mobile_number', 'location', 'address', 'birthdate',
       'resume_filename', 'resume_url',
       'interview_notes', 'internal_notes', 'notes_by', 'notes_date', 'status',
-      'candidate_code', 'register_no', 'skills'
+      'candidate_code', 'register_no', 'skills', 'dept_id', 'branch_id', 'department_name'
     ];
 
     const updateFields = [];
-    const values = [];
-
-    for (const field of allowedFields) {
-      if (field in updateData) {
-        updateFields.push(`${field} = ?`);
-        let val = updateData[field];
-        if (field === 'skills' && Array.isArray(val)) val = JSON.stringify(val);
-        else if (field === 'skills' && typeof val === 'string' && val !== '') {
+    Object.keys(candidateData).forEach(key => {
+      if (allowedFields.includes(key)) {
+        updateFields.push(`\`${key}\` = ?`);
+        let val = candidateData[key];
+        if (key === 'skills' && Array.isArray(val)) val = JSON.stringify(val);
+        else if (key === 'skills' && typeof val === 'string' && val !== '') {
           try { JSON.parse(val); } catch (_) { val = '[]'; }
         }
         values.push(val);
       }
-    }
+    });
 
     if (updateFields.length === 0) {
-      throw new Error('No valid fields to update');
+      return false; // Or throw error
     }
 
+    const updatedAt = new Date();
     updateFields.push('updated_at = ?');
     values.push(updatedAt);
 
-    values.push(candidateId, organizationId);
+    values.push(candidateId, candidateId, organizationId);
 
     const query = `
       UPDATE ${database}.college_candidates 
       SET ${updateFields.join(', ')} 
-      WHERE candidate_id = ? AND organization_id = ?
+      WHERE (candidate_id = ? OR REPLACE(candidate_id, '-', '') = REPLACE(?, '-', ''))
+      AND organization_id = ?
     `;
 
     const result = await db.query(query, values);
@@ -892,10 +1374,124 @@ class CandidateModel {
   static async getCandidateByEmail(email, organizationId, database = 'candidates_db') {
     const query = `
       SELECT * FROM ${database}.college_candidates 
-      WHERE email = ? AND organization_id = ?
+      WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) AND organization_id = ?
       LIMIT 1
     `;
+    const rows = await db.query(query, [email, organizationId]);
+    return rows.length > 0 ? rows[0] : null;
+  }
 
+  // Get candidate by email globally (no org filter) - for finding self-registered candidates
+  static async getCandidateByEmailGlobal(email, database = 'candidates_db') {
+    const query = `
+      SELECT * FROM ${database}.college_candidates 
+      WHERE email = ? AND (organization_id IS NULL OR organization_id = '' OR organization_id = 'null')
+      LIMIT 1
+    `;
+    const rows = await db.query(query, [email]);
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  // Check if candidate exists globally (different organization)
+  static async checkGlobalCandidateExists(email, organizationId) {
+    const query = `
+      SELECT c.organization_id, o.name as college_name 
+      FROM candidates_db.college_candidates c
+      LEFT JOIN auth_db.organizations o ON c.organization_id = o.id
+      WHERE LOWER(TRIM(c.email)) = LOWER(?) 
+      AND (c.organization_id != ? OR c.organization_id IS NULL OR c.organization_id = '')
+      LIMIT 1
+    `;
+    const rows = await db.query(query, [email, organizationId]);
+    if (rows.length > 0) {
+      const orgId = rows[0].organization_id;
+      const isIndependent = !orgId || orgId === 'null' || orgId.trim() === '';
+      return {
+        exists: true,
+        college_name: rows[0].college_name || 'Independent Signup',
+        is_independent: isIndependent
+      };
+    }
+    return { exists: false };
+  }
+
+  // Get full global candidate details by matching email and mobile
+  static async getGlobalCandidateByMobile(email, mobile, organizationId) {
+    const normMobile = mobile && String(mobile).replace(/\D/g, '').replace(/^91(?=\d{10})/, '');
+    const query = `
+      SELECT * FROM candidates_db.college_candidates 
+      WHERE LOWER(TRIM(email)) = LOWER(?) 
+      AND (mobile_number = ? OR mobile_number LIKE ?) 
+      AND organization_id != ? 
+      LIMIT 1
+    `;
+    const rows = await db.query(query, [email, mobile, `%${normMobile}`, organizationId]);
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  // Save verification OTP for global profile identification
+  static async saveGlobalVerificationOTP(email, code) {
+    const normEmail = email?.trim().toLowerCase();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const query = `
+      INSERT INTO global_verification_codes (email, code, expires_at) 
+      VALUES (?, ?, ?) 
+      ON DUPLICATE KEY UPDATE code = ?, expires_at = ?, used = 0
+    `;
+    await db.authQuery(query, [normEmail, code, expiresAt, code, expiresAt]);
+  }
+
+  // Verify OTP and return success
+  static async verifyGlobalVerificationOTP(email, code) {
+    const normEmail = email?.trim().toLowerCase();
+    console.log(`[OTP Verification] Checking for email: ${normEmail}, code: ${code}`);
+    try {
+      const query = `
+        SELECT id, expires_at, used FROM global_verification_codes 
+        WHERE email = ? AND code = ? 
+        LIMIT 1
+      `;
+      const rows = await db.authQuery(query, [normEmail, code]);
+      
+      if (rows.length === 0) {
+        console.log(`[OTP Verification] No matching record found for ${normEmail} and code ${code}`);
+        return false;
+      }
+
+      const { id, expires_at, used } = rows[0];
+      const now = new Date();
+      const expiry = new Date(expires_at);
+      
+      console.log(`[OTP Verification] Record found. Used: ${used}, Expiry: ${expiry}, Now: ${now}`);
+
+      if (used === 1) {
+        console.log(`[OTP Verification] OTP already used.`);
+        return false;
+      }
+
+      // Add a 1-minute grace period
+      if (expiry.getTime() + 60000 < now.getTime()) {
+        console.log(`[OTP Verification] OTP expired.`);
+        return false;
+      }
+
+      await db.authQuery(`UPDATE global_verification_codes SET used = 1 WHERE id = ?`, [id]);
+      console.log(`[OTP Verification] Verification successful.`);
+      return true;
+    } catch (error) {
+      console.error(`[OTP Verification] Database error:`, error);
+      throw error;
+    }
+  }
+
+  // Get full global candidate details (after OTP verification)
+  static async getFullGlobalCandidateByEmail(email, organizationId) {
+    const query = `
+      SELECT * FROM candidates_db.college_candidates 
+      WHERE LOWER(TRIM(email)) = LOWER(?) 
+      AND (organization_id != ? OR organization_id IS NULL OR organization_id = '')
+      LIMIT 1
+    `;
     const rows = await db.query(query, [email, organizationId]);
     return rows.length > 0 ? rows[0] : null;
   }
@@ -948,7 +1544,8 @@ class CandidateModel {
       location,
       address,
       birthdate,
-      skills
+      skills,
+      candidate_created_by
     } = data;
 
     if (!organization_id || !candidate_id || !email) {
@@ -970,6 +1567,7 @@ class CandidateModel {
           address = COALESCE(?, address),
           birthdate = COALESCE(?, birthdate),
           skills = COALESCE(?, skills),
+          candidate_created_by = COALESCE(?, candidate_created_by),
           updated_at = NOW()
         WHERE candidate_id = ? AND organization_id = ?
       `;
@@ -983,6 +1581,7 @@ class CandidateModel {
         address != null ? address : existing.address,
         birthdate != null ? birthdate : existing.birthdate,
         skillsJson,
+        candidate_created_by || null,
         existing.candidate_id,
         organization_id
       ]);
@@ -994,8 +1593,9 @@ class CandidateModel {
       INSERT INTO \`${database}\`.college_candidates (
         candidate_id, organization_id, candidate_code, register_no,
         candidate_name, department, semester, email, mobile_number,
-        location, address, birthdate, status, skills, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'All', ?, NOW(), NOW())
+        location, address, birthdate, status, skills, 
+        candidate_created_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'All', ?, ?, NOW(), NOW())
     `;
     await db.query(insertSql, [
       candidate_id,
@@ -1010,7 +1610,8 @@ class CandidateModel {
       location || null,
       address || null,
       birthdate || null,
-      skillsJson
+      skillsJson,
+      candidate_created_by || null
     ]);
     return candidate_id;
   }
@@ -1090,6 +1691,7 @@ class CandidateModel {
     const linkIdBinary = this.uuidToBinary(linkId);
     const positionIdBinary = this.uuidToBinary(linkData.position_id);
     const questionSetIdBinary = this.uuidToBinary(linkData.question_set_id);
+    const questionSectionIdBinary = this.uuidToBinary(linkData.question_section_id);
     const createdByBinary = this.uuidToBinary(linkData.created_by);
 
     // Choose table based on link type
@@ -1133,8 +1735,8 @@ class CandidateModel {
       // Public link structure
       const query = `
         INSERT INTO ${database}.${tableName} 
-        (id, client_id, position_id, question_set_id, tenant_id, link, active_at, expire_at, created_by, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, client_id, position_id, question_set_id, question_section_id, tenant_id, link, active_at, expire_at, created_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
 
       const values = [
@@ -1142,6 +1744,7 @@ class CandidateModel {
         linkData.client_id,
         positionIdBinary,
         questionSetIdBinary,
+        questionSectionIdBinary,
         linkData.tenant_id,
         linkData.link,
         linkData.active_at || createdAt,
@@ -1386,7 +1989,7 @@ class CandidateModel {
     const questionSetIdBinary = questionSetId ? Buffer.from(questionSetId.toString().replace(/-/g, ''), 'hex') : null;
 
     let query = `
-      SELECT id as link_id, link, expire_at, active_at, tenant_id
+      SELECT id as link_id, link, expire_at, active_at, tenant_id, HEX(question_section_id) as question_section_id
       FROM ${database}.public_link 
       WHERE client_id = ? 
         AND position_id = ? 
@@ -1403,8 +2006,14 @@ class CandidateModel {
 
     query += ` ORDER BY created_at DESC LIMIT 1`;
 
-    const rows = await db.query(query, queryParams);
-    return rows.length > 0 ? rows[0] : null;
+      const [existingLink] = await db.query(query, queryParams);
+      if (existingLink) {
+        return {
+          ...existingLink,
+          question_section_id: existingLink.question_section_id
+        };
+      }
+      return null;
   }
 
   // Create candidate position mapping
@@ -2096,10 +2705,12 @@ class CandidateModel {
         `SELECT cp.position_candidate_id as positionCandidateId, cp.candidate_id as candidateId, cp.position_id as positionId,
                 cp.question_set_id as questionSetId, cp.invited_date as linkActiveAt, cp.link_expires_at as linkExpiresAt,
                 cp.candidate_name as candidateName,
-                COALESCE(p.title, cp.job_title) as positionName
+                COALESCE(p.title, cp.job_title) as positionName,
+                cc.email as candidateEmail
          FROM \`${tenantDb}\`.candidate_positions cp
          LEFT JOIN \`${tenantDb}\`.positions p
            ON p.id = UNHEX(REPLACE(COALESCE(cp.position_id, ''), '-', ''))
+         LEFT JOIN \`candidates_db\`.college_candidates cc ON cc.candidate_id = cp.candidate_id
          WHERE cp.position_candidate_id = ? LIMIT 1`,
         [positionCandidateId]
       );
@@ -2113,7 +2724,8 @@ class CandidateModel {
         linkActiveAt: r.linkActiveAt,
         linkExpiresAt: r.linkExpiresAt,
         candidateName: r.candidateName,
-        positionName: r.positionName
+        positionName: r.positionName,
+        candidateEmail: r.candidateEmail
       };
     }
     if (tables.includes('position_candidates') && hexId.length === 32) {
@@ -2605,6 +3217,101 @@ class CandidateModel {
       createdAt: createdDtStr,
       updatedAt: createdDtStr
     };
+  }
+
+  // Fetch academic metadata (Departments, Branches, Subjects) for an organization
+  static async getAcademicMetadata(tenantDb, organizationId) {
+    const orgIdBuffer = Buffer.from(organizationId.replace(/-/g, ''), 'hex');
+    
+    const [departments, branches, subjects] = await Promise.all([
+      db.query(`SELECT id, name, code FROM \`${tenantDb}\`.college_departments WHERE organization_id = ?`, [organizationId]),
+      db.query(`SELECT id, department_id, name, code FROM \`${tenantDb}\`.college_branches WHERE department_id IN (SELECT id FROM \`${tenantDb}\`.college_departments WHERE organization_id = ?)`, [organizationId]),
+      db.query(`SELECT id, branch_id, name, code, semester FROM \`${tenantDb}\`.college_subjects WHERE branch_id IN (SELECT b.id FROM \`${tenantDb}\`.college_branches b JOIN \`${tenantDb}\`.college_departments d ON b.department_id = d.id WHERE d.organization_id = ?)`, [organizationId])
+    ]);
+
+    return { departments, branches, subjects };
+  }
+
+  // Fetch candidates for bulk email with specific filters
+  static async getCandidatesForBulkEmail(tenantDb, organizationId, filters = {}) {
+    const limit = parseInt(filters.limit) || 25;
+    const offset = parseInt(filters.offset) || 0;
+
+    // MANDATORY: User wants to show nothing until a search or filter is selected
+    if (!filters.dept_id && !filters.branch_id && !filters.semester && !filters.search) {
+      return { data: [], total: 0 };
+    }
+
+    // Resolve target database: prefer tenantDb if college_candidates exists there
+    let targetDb = 'candidates_db';
+    if (tenantDb) {
+      const dbCheck = await db.query(
+        `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'college_candidates'`,
+        [tenantDb]
+      );
+      if (dbCheck && dbCheck.length > 0) {
+        targetDb = tenantDb;
+      }
+    }
+
+    let whereClause = `WHERE organization_id = ?`;
+    const params = [organizationId];
+
+    if (filters.dept_id) {
+      whereClause += ` AND dept_id = ?`;
+      params.push(filters.dept_id);
+    }
+    if (filters.branch_id) {
+      whereClause += ` AND branch_id = ?`;
+      params.push(filters.branch_id);
+    }
+    if (filters.semester) {
+      whereClause += ` AND semester = ?`;
+      params.push(filters.semester);
+    }
+    if (filters.search) {
+      whereClause += ` AND (candidate_name LIKE ? OR email LIKE ? OR register_no LIKE ?)`;
+      const searchVal = `%${filters.search}%`;
+      params.push(searchVal, searchVal, searchVal);
+    }
+
+    const countQuery = `SELECT COUNT(*) as total FROM \`${targetDb}\`.college_candidates ${whereClause}`;
+    const countResult = await db.query(countQuery, params);
+    const total = countResult[0]?.total || 0;
+
+    const dataQuery = `
+      SELECT 
+        candidate_id as id, 
+        candidate_name as name, 
+        email, 
+        mobile_number as mobile,
+        department, 
+        branch_id as branch,
+        semester,
+        register_no as register_no,
+        subjects
+      FROM \`${targetDb}\`.college_candidates
+      ${whereClause}
+      ORDER BY candidate_name ASC
+      LIMIT ? OFFSET ?
+    `;
+    const data = await db.query(dataQuery, [...params, limit, offset]);
+
+    return { data, total };
+  }
+
+  // Get unique passout years (batches) for student module
+  static async getUniqueBatches(organizationId, database = 'candidates_db') {
+    const query = `
+      SELECT DISTINCT year_of_passing 
+      FROM ${database}.college_candidates 
+      WHERE organization_id = ? 
+        AND year_of_passing IS NOT NULL 
+        AND TRIM(year_of_passing) != ''
+      ORDER BY year_of_passing DESC
+    `;
+    const rows = await db.query(query, [organizationId]);
+    return (rows || []).map(r => r.year_of_passing);
   }
 }
 

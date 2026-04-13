@@ -1,5 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
+const { getDb, COLLECTIONS } = require('../config/mongo');
+const ActivityLogService = require('./activityLogService');
 const fileStorageUtil = require('../utils/fileStorageUtil');
 
 /** Normalize position ID for DB: HEX(id) / UNHEX(?) expect 32-char hex (no dashes). */
@@ -126,8 +128,10 @@ const createPosition = async (tenantDb, positionData) => {
         jobDescriptionFileName,
         expectedStartDate,
         applicationDeadline,
+        company_name,
         createdBy,
-        userId
+        userId,
+        jobDescriptionText
     } = positionData;
 
     let resolvedTenantDb = tenantDb;
@@ -220,15 +224,17 @@ const createPosition = async (tenantDb, positionData) => {
                 minimum_experience,
                 maximum_experience,
                 no_of_positions,
-                job_description_document_path,
+                job_description_document_path, 
                 job_description_document_file_name,
+                job_description,
                 position_status,
                 expected_start_date,
                 application_deadline,
+                company_name,
                 created_by,
                 created_at,
                 updated_at
-            ) VALUES (UNHEX(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            ) VALUES (UNHEX(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
         `;
 
         const positionIdClean = positionId.replace(/-/g, '');
@@ -247,11 +253,40 @@ const createPosition = async (tenantDb, positionData) => {
                     noOfPositions,
                     jobDescriptionPath || null,
                     jobDescriptionFileName || null,
+                    jobDescriptionText || null,
                     'ACTIVE', // Default status to ACTIVE
                     toNormalizedDate(expectedStartDate),
                     toNormalizedDate(applicationDeadline),
+                    company_name || null,
                     createdBy
                 ]);
+
+                // Log activity
+                try {
+                    await ActivityLogService.logActivity(resolvedTenantDb, {
+                        organizationId: (positionData.organizationId || positionData.organization_id),
+                        actorId: userId || createdBy,
+                        actorName: positionData.actorName || 'Admin',
+                        actorRole: positionData.actorRole || 'Admin',
+                        activityType: 'JOB_POSTED',
+                        activityTitle: title, // Use position title directly
+                        activityDescription: jobDescriptionFileName 
+                            ? `New position "${title}" created with ${noOfPositions} openings. JD: ${jobDescriptionFileName}`
+                            : `New position "${title}" created with ${noOfPositions} openings.`,
+                        entityId: positionId,
+                        entityType: 'POSITION',
+                        metadata: {
+                            positionName: title,
+                            positionId: positionCode,
+                            domainType,
+                            noOfPositions,
+                            jdFile: jobDescriptionFileName
+                        }
+                    });
+                } catch (logErr) {
+                    console.warn('[PositionService] Activity logging failed:', logErr.message);
+                }
+
                 inserted = true;
             } catch (insertError) {
                 if (insertError && insertError.code === 'ER_DUP_ENTRY') {
@@ -299,6 +334,15 @@ const createPosition = async (tenantDb, positionData) => {
 
         await db.query(updateCreditsQuery, []);
 
+        // Credit Utilized Notification (Position Credit)
+        // Since this is a global notification (new position), we already have that trigger in positionController.
+        // But the user asked for "how much it is been utilized for that also".
+        // If it's a specific candidate being added to the position, it's done elsewhere.
+        // If it's just the ADMIN utilizing a credit, we might want to notify the admin, 
+        // but the system is for CANDIDATE notifications.
+        // The user said: "if the admin added the test for this candidate ... also look the credits also how much it is been utilized for that also".
+        // This confirms it's related to candidates.
+        
         console.log(`[PositionService] Position created successfully: ${positionId}, Code: ${positionCode}`);
 
         return {
@@ -317,6 +361,7 @@ const createPosition = async (tenantDb, positionData) => {
             completedInterviews: 0,
             expectedStartDate: expectedStartDate || null,
             applicationDeadline: applicationDeadline || null,
+            companyName: company_name || null,
             internalNotes: null,
             mandatorySkills,
             optionalSkills,
@@ -339,7 +384,7 @@ const createPosition = async (tenantDb, positionData) => {
  */
 const getPositions = async (tenantDb, filters = {}) => {
     try {
-        const { status, search, limit = 10, offset = 0, page = 0, size = 10, userId, domain, experience } = filters;
+        const { status, search, limit = 10, offset = 0, page = 0, size = 10, userId, domain, experience, createdBy } = filters;
         const limitNum = parseInt(size) || 10;
         const offsetNum = (parseInt(page) * limitNum) || 0;
 
@@ -362,34 +407,45 @@ const getPositions = async (tenantDb, filters = {}) => {
             throw new Error('Could not resolve tenant database for positions retrieval');
         }
 
+        const tableCheck = await db.query(
+            `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('jobs', 'positions')`,
+            [resolvedTenantDb]
+        );
+        const existingTables = (tableCheck || []).map(t => t.TABLE_NAME);
+        const useJobs = existingTables.includes('jobs');
+        const tableName = useJobs ? 'jobs' : 'positions';
+
         let query = `
             SELECT 
                 HEX(p.id) as id,
                 p.code,
-                p.title,
-                p.domain_type as domainType,
-                p.minimum_experience as minimumExperience,
-                p.maximum_experience as maximumExperience,
-                p.job_description_document_path as jobDescriptionDocumentPath,
-                p.job_description_document_file_name as jobDescriptionDocumentFileName,
+                ${useJobs ? 'p.job_title' : 'p.title'} as title,
+                ${useJobs ? 'p.job_type' : 'p.domain_type'} as domainType,
+                ${useJobs ? 'p.experience_min' : 'p.minimum_experience'} as minimumExperience,
+                ${useJobs ? 'p.experience_max' : 'p.maximum_experience'} as maximumExperience,
+                ${useJobs ? 'p.job_description_document_path' : 'p.job_description_document_path'} as jobDescriptionDocumentPath,
+                ${useJobs ? 'p.job_description_document_file_name' : 'p.job_description_document_file_name'} as jobDescriptionDocumentFileName,
                 p.no_of_positions as noOfPositions,
-                p.position_status as status,
+                ${useJobs ? 'p.status' : 'p.position_status'} as status,
                 p.internal_notes as internalNotes,
+                ${useJobs ? 'NULL' : 'p.company_name'} as companyName,
                 p.created_by as createdBy,
                 p.id as raw_id,
                 p.created_at as createdAt,
                 p.updated_at as updatedAt
-            FROM \`${resolvedTenantDb}\`.positions p
+            FROM \`${resolvedTenantDb}\`.\`${tableName}\` p
             WHERE 1=1
         `;
+
 
         const params = [];
         let whereClause = '';
 
         if (status) {
-            whereClause += ` AND p.position_status = ?`;
+            whereClause += ` AND ${useJobs ? 'p.status' : 'p.position_status'} = ?`;
             params.push(status);
         }
+
 
         if (search) {
             whereClause += ` AND (p.title LIKE ? OR p.code LIKE ?)`;
@@ -399,6 +455,11 @@ const getPositions = async (tenantDb, filters = {}) => {
         if (domain) {
             whereClause += ` AND p.domain_type = ?`;
             params.push(domain);
+        }
+
+        if (createdBy) {
+            whereClause += ` AND p.created_by = ?`;
+            params.push(createdBy);
         }
 
         if (experience) {
@@ -411,14 +472,16 @@ const getPositions = async (tenantDb, filters = {}) => {
                     const minExp = parseInt(match[1]);
                     const maxExp = parseInt(match[2]);
                     // Overlap logic: position range overlaps with selected range
-                    whereClause += ` AND p.minimum_experience <= ? AND p.maximum_experience >= ?`;
+                    whereClause += ` AND ${useJobs ? 'p.experience_min' : 'p.minimum_experience'} <= ? AND ${useJobs ? 'p.experience_max' : 'p.maximum_experience'} >= ?`;
                     params.push(maxExp, minExp);
+
                 }
             }
         }
 
         // 1. Get total count for pagination
-        const countQuery = `SELECT COUNT(*) as total FROM \`${resolvedTenantDb}\`.positions p WHERE 1=1 ${whereClause}`;
+        const countQuery = `SELECT COUNT(*) as total FROM \`${resolvedTenantDb}\`.\`${tableName}\` p WHERE 1=1 ${whereClause}`;
+
         const countResult = await db.query(countQuery, params);
         const totalElements = countResult[0]?.total || 0;
 
@@ -466,6 +529,7 @@ const getPositions = async (tenantDb, filters = {}) => {
                     questionSetCount: questionSetCountMap[normalizePositionIdHex(position.id)] ?? 0,
                     expectedStartDate: position.expectedStartDate,
                     applicationDeadline: position.applicationDeadline,
+                    companyName: position.companyName,
                     internalNotes: position.internalNotes,
                     mandatorySkills: mandatorySkills.map((s) => s.skill),
                     optionalSkills: optionalSkills.map((s) => s.skill),
@@ -514,31 +578,42 @@ const getPositionById = async (tenantDb, positionId, userId) => {
             throw new Error('Could not resolve tenant database for position retrieval');
         }
 
+        const tableCheck = await db.query(
+            `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('jobs', 'positions')`,
+            [resolvedTenantDb]
+        );
+        const existingTables = (tableCheck || []).map(t => t.TABLE_NAME);
+        const useJobs = existingTables.includes('jobs');
+        const tableName = useJobs ? 'jobs' : 'positions';
+
         const positionIdHex = toPositionIdHex(positionId);
         const query = `
             SELECT 
                 HEX(p.id) as id,
                 p.code,
-                p.title,
-                p.domain_type as domainType,
-                p.minimum_experience as minimumExperience,
-                p.maximum_experience as maximumExperience,
+                ${useJobs ? 'p.job_title' : 'p.title'} as title,
+                ${useJobs ? 'p.job_type' : 'p.domain_type'} as domainType,
+                ${useJobs ? 'p.experience_min' : 'p.minimum_experience'} as minimumExperience,
+                ${useJobs ? 'p.experience_max' : 'p.maximum_experience'} as maximumExperience,
                 p.no_of_positions as noOfPositions,
-                p.position_status as status,
-                p.interview_invite_sent as interviewInviteSent,
-                p.completed_interviews as completedInterviews,
+                ${useJobs ? 'p.status' : 'p.position_status'} as status,
+                ${useJobs ? 'p.interview_invite_sent' : 'p.interview_invite_sent'} as interviewInviteSent,
+                ${useJobs ? 'p.completed_interviews' : 'p.completed_interviews'} as completedInterviews,
                 p.expected_start_date as expectedStartDate,
                 p.application_deadline as applicationDeadline,
+                ${useJobs ? 'NULL' : 'p.company_name'} as companyName,
                 p.job_description_document_path as jobDescriptionDocumentPath,
                 p.job_description_document_file_name as jobDescriptionDocumentFileName,
+                p.job_description as jobDescriptionText,
                 p.internal_notes as internalNotes,
                 p.created_by as createdBy,
                 p.created_at as createdAt,
                 p.updated_at as updatedAt
-            FROM \`${resolvedTenantDb}\`.positions p
+            FROM \`${resolvedTenantDb}\`.\`${tableName}\` p
             WHERE HEX(p.id) = ?
             LIMIT 1
         `;
+
 
         const rows = await db.query(query, [positionIdHex]);
 
@@ -714,7 +789,8 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
             applicationDeadline,
             internalNotes,
             jobDescriptionDocumentPath,
-            jobDescriptionDocumentFileName
+            jobDescriptionDocumentFileName,
+            jobDescriptionText
         } = updateData;
 
         // Build dynamic update query
@@ -760,6 +836,10 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
         if (jobDescriptionDocumentFileName !== undefined) {
             updateFields.push('job_description_document_file_name = ?');
             params.push(jobDescriptionDocumentFileName);
+        }
+        if (jobDescriptionText !== undefined) {
+            updateFields.push('job_description = ?');
+            params.push(jobDescriptionText);
         }
 
         const positionIdHex = toPositionIdHex(positionId);
@@ -815,6 +895,28 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
 
         console.log(`[PositionService] Position updated: ${positionId}`);
 
+        // Log activity
+        try {
+            await ActivityLogService.logActivity(resolvedTenantDb, {
+                organizationId: (positionData.organizationId || positionData.organization_id),
+                actorId: userId || positionData.userId,
+                actorName: positionData.actorName || 'Admin',
+                actorRole: positionData.actorRole || 'Admin',
+                activityType: 'UPDATE',
+                activityTitle: 'Position Updated',
+                activityDescription: `Position "${title || 'N/A'}" was updated`,
+                entityId: positionId,
+                entityType: 'POSITION',
+                metadata: {
+                    positionName: title,
+                    domainType,
+                    noOfPositions
+                }
+            });
+        } catch (logErr) {
+            console.warn('[PositionService] Activity logging failed (update):', logErr.message);
+        }
+
         // Return updated position
         return getPositionById(resolvedTenantDb, positionId, userId);
     } catch (error) {
@@ -829,7 +931,7 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
  * @param {string} userId - User ID for fallback context
  * @returns {object} Counts grouped by status
  */
-const getPositionCounts = async (tenantDb, userId) => {
+const getPositionCounts = async (tenantDb, userId, dataFilter = {}) => {
     try {
         let resolvedTenantDb = tenantDb;
 
@@ -850,15 +952,23 @@ const getPositionCounts = async (tenantDb, userId) => {
             throw new Error('Could not resolve tenant database for position counts');
         }
 
+        let whereClause = 'WHERE 1=1';
+        const params = [];
+        if (dataFilter.createdBy) {
+            whereClause += ' AND created_by = ?';
+            params.push(dataFilter.createdBy);
+        }
+
         const query = `
             SELECT 
                 position_status as status,
                 COUNT(*) as count
             FROM \`${resolvedTenantDb}\`.positions
+            ${whereClause}
             GROUP BY position_status
         `;
 
-        const rows = await db.query(query, []);
+        const rows = await db.query(query, params);
 
         // Map rows to a more usable object format
         const counts = {
@@ -893,7 +1003,7 @@ const getPositionCounts = async (tenantDb, userId) => {
  * @param {string} userId - User ID for fallback
  * @returns {object} Filter options
  */
-const getFilterMetadata = async (tenantDb, userId) => {
+const getFilterMetadata = async (tenantDb, userId, dataFilter = {}) => {
     try {
         let resolvedTenantDb = tenantDb;
 
@@ -914,13 +1024,20 @@ const getFilterMetadata = async (tenantDb, userId) => {
             throw new Error('Could not resolve tenant database for filter metadata');
         }
 
+        let whereClause = 'WHERE 1=1';
+        const params = [];
+        if (dataFilter.createdBy) {
+            whereClause += ' AND created_by = ?';
+            params.push(dataFilter.createdBy);
+        }
+
         // Get distinct domains
-        const domainQuery = `SELECT DISTINCT domain_type as domain FROM \`${resolvedTenantDb}\`.positions WHERE domain_type IS NOT NULL AND domain_type != ''`;
-        const domainRows = await db.query(domainQuery, []);
+        const domainQuery = `SELECT DISTINCT domain_type as domain FROM \`${resolvedTenantDb}\`.positions ${whereClause} AND domain_type IS NOT NULL AND domain_type != ''`;
+        const domainRows = await db.query(domainQuery, params);
 
         // Get distinct experience ranges
-        const expQuery = `SELECT DISTINCT minimum_experience, maximum_experience FROM \`${resolvedTenantDb}\`.positions ORDER BY minimum_experience ASC, maximum_experience ASC`;
-        const expRows = await db.query(expQuery, []);
+        const expQuery = `SELECT DISTINCT minimum_experience, maximum_experience FROM \`${resolvedTenantDb}\`.positions ${whereClause} ORDER BY minimum_experience ASC, maximum_experience ASC`;
+        const expRows = await db.query(expQuery, params);
 
         const domains = domainRows.map(r => r.domain);
         const experiences = expRows.map(r => `${r.minimum_experience}-${r.maximum_experience} Years`);
@@ -939,16 +1056,17 @@ const getFilterMetadata = async (tenantDb, userId) => {
  * Update only job description path and filename on a position (no file storage).
  * Used after client uploads JD and calls PUT with the path.
  */
-const updatePositionPathOnly = async (tenantDb, positionId, relativePath, fileName) => {
+const updatePositionPathOnly = async (tenantDb, positionId, relativePath, fileName, jdText) => {
     const positionIdHex = toPositionIdHex(positionId);
     const updateQuery = `
         UPDATE \`${tenantDb}\`.positions
         SET job_description_document_path = ?,
             job_description_document_file_name = ?,
+            job_description = COALESCE(?, job_description),
             updated_at = NOW()
         WHERE HEX(id) = ?
     `;
-    await db.query(updateQuery, [relativePath, fileName || 'document.pdf', positionIdHex]);
+    await db.query(updateQuery, [relativePath, fileName || 'document.pdf', jdText || null, positionIdHex]);
 };
 
 /**

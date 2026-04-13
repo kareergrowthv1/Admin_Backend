@@ -58,9 +58,18 @@ const createQuestionSet = async (tenantDb, data) => {
     const idClean = id.replace(/-/g, '');
     let questionSetCode = await getNextQuestionSetCode(resolvedTenantDb);
 
+    // Dynamic Column Detection: job_id (ATS) or position_id (College)
+    const columnCheck = await db.query(
+        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'question_sets' AND COLUMN_NAME IN ('job_id', 'position_id')`,
+        [resolvedTenantDb]
+    );
+    const existingColumns = columnCheck.map(c => c.COLUMN_NAME);
+    const idColumn = existingColumns.includes('job_id') ? 'job_id' : 'position_id';
+
     const query = `
         INSERT INTO \`${resolvedTenantDb}\`.question_sets (
-            id, question_set_code, ${data.jobId ? 'job_id' : 'position_id'}, 
+            id, question_set_code, ${idColumn}, 
             total_questions, total_duration, 
             interview_platform, interview_mode, created_by, 
             complexity_level, general_questions_count, 

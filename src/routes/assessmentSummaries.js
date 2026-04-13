@@ -12,9 +12,9 @@ const tenantMiddleware = require('../middlewares/tenant.middleware');
 const CandidateModel = require('../models/candidateModel');
 const questionSectionService = require('../services/questionSectionService');
 
-/** DB where assessments_summary table exists. Always use candidates_db (shared); do not use tenant DB. */
-function getAssessmentSummaryDb() {
-  return 'candidates_db';
+/** DB where assessments_summary table exists. Use tenant DB from req.tenantDb. */
+function getAssessmentSummaryDb(req) {
+  return req?.tenantDb || 'candidates_db';
 }
 
 function toCleanAssessmentData(raw) {
@@ -77,7 +77,7 @@ router.get('/', tenantMiddleware, async (req, res) => {
     if (!candidateId || !positionId) {
       return res.status(400).json({ success: false, message: 'candidateId and positionId are required' });
     }
-    const summaryDb = getAssessmentSummaryDb();
+    const summaryDb = getAssessmentSummaryDb(req);
     let result = await CandidateModel.getAssessmentSummary(candidateId, positionId, summaryDb);
     if (result && req.tenantDb && result.questionId && (result.round1GivenTime == null && result.round2GivenTime == null && result.round3GivenTime == null && result.round4GivenTime == null)) {
       try {
@@ -150,7 +150,7 @@ router.post('/', tenantMiddleware, authMiddleware, async (req, res) => {
       totalInterviewTime: totalInterviewTime ?? '0',
       round1GivenTime: round1, round2GivenTime: round2, round3GivenTime: round3, round4GivenTime: round4
     };
-    const db = getAssessmentSummaryDb();
+    const db = getAssessmentSummaryDb(req);
     const result = await CandidateModel.createAssessmentSummary(summaryData, db);
     return res.status(201).json({
       success: true,
@@ -173,7 +173,7 @@ router.patch('/', tenantMiddleware, async (req, res) => {
     if (!candidateId || !positionId) {
       return res.status(400).json({ success: false, message: 'candidateId and positionId are required' });
     }
-    const db = getAssessmentSummaryDb();
+    const db = getAssessmentSummaryDb(req);
     const result = await CandidateModel.updateAssessmentSummary(candidateId, positionId, rest, db, assessmentSummaryId || null);
     if (!result) return res.status(404).json({ success: false, message: 'Assessment summary not found' });
     return res.status(200).json({
@@ -212,7 +212,7 @@ router.put('/round-timing', tenantMiddleware, async (req, res) => {
         message: 'positionId, candidateId, and roundNumber (1-4) are required'
       });
     }
-    const summaryDb = getAssessmentSummaryDb();
+    const summaryDb = getAssessmentSummaryDb(req);
     const roundNum = Number(roundNumber);
     const updates = {};
     if (roundNum === 1) {

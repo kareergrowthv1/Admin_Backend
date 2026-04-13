@@ -1,11 +1,17 @@
 const db = require('../config/db');
+const { getDb, COLLECTIONS } = require('../config/mongo');
 const config = require('../config');
 const CandidateModel = require('../models/candidateModel');
 const AiAssistantService = require('./aiAssistantService');
 const questionSectionService = require('./questionSectionService');
 const emailService = require('./emailService');
+const whatsappService = require('./whatsappService');
 const { CANDIDATE_STATUSES, LINK_TYPES } = require('../models/candidateConstants');
 const fileStorageUtil = require('../utils/fileStorageUtil');
+const ActivityLogService = require('./activityLogService');
+const rbacService = require('./rbacService');
+const bcrypt = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
 
 function parseSkills(skills) {
   if (Array.isArray(skills)) return skills;
@@ -21,15 +27,89 @@ function parseSkills(skills) {
 }
 
 class CandidateService {
+  // Resend invitation email to candidate
+  static async resendInvitation(candidateId, organizationId, tenantDb) {
+    try {
+      // 1. Fetch candidate details
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
+      if (!candidate) {
+        throw new Error('Candidate not found');
+      }
+
+      const email = (candidate.email || '').trim().toLowerCase();
+      const candidateName = candidate.candidate_name;
+
+      if (!email) {
+        throw new Error('Candidate has no email address');
+      }
+
+      // 2. Resolve candidate login from auth_db.candidate_login
+      const authRows = await db.authQuery(
+        'SELECT id FROM candidate_login WHERE email = ? AND organization_id = ? LIMIT 1',
+        [email, organizationId]
+      );
+
+      let tempPassword = Math.random().toString(36).slice(-8);
+      const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+      if (authRows.length > 0) {
+        // Update existing account
+        const authCandidateId = authRows[0].id;
+        await db.authQuery(
+          'UPDATE candidate_login SET password_hash = ?, updated_at = NOW() WHERE id = ?',
+          [hashedPassword, authCandidateId]
+        );
+        console.log(`[CandidateService] Reset password for candidate_login account: ${email}`);
+      } else {
+        // Create new account if missing (self-healing)
+        const authCandidateId = uuidv4();
+        await db.authQuery(
+          `INSERT INTO candidate_login (id, email, mobile_number, password_hash, name, organization_id, is_active, created_at, updated_at) 
+           VALUES (?, ?, ?, ?, ?, ?, true, NOW(), NOW())`,
+          [authCandidateId, email, candidate.mobile_number, hashedPassword, candidateName, organizationId]
+        );
+        console.log(`[CandidateService] Provisioned missing candidate_login account for ${email}`);
+      }
+
+      // 3. Send invitation email
+      const loginUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_LINK_BASE_URL || '').trim();
+      const adminName = 'Your College Admin'; // Ideally fetch from request context if available
+
+      await emailService.sendCandidateInvitationEmail(
+        email,
+        candidateName,
+        adminName,
+        tempPassword,
+        loginUrl
+      );
+
+      return {
+        success: true,
+        message: 'Invitation resent successfully'
+      };
+    } catch (error) {
+      console.error('[CandidateService] Resend invitation failed:', error.message);
+      throw error;
+    }
+  }
+
   // Create a new candidate
-  static async createCandidate(candidateData) {
+  static async createCandidate(candidateData, tenantDb, resumeFile) {
     try {
       const normalized = {
         ...candidateData,
-        email: candidateData.email || candidateData.candidate_email,
-        mobile_number: candidateData.mobile_number || candidateData.candidate_mobile_number,
+        organization_id: candidateData.organization_id || candidateData.organizationId,
+        email: (candidateData.email || candidateData.candidate_email || '').trim().toLowerCase(),
+        mobile_number: candidateData.mobile_number || candidateData.candidate_mobile_number || candidateData.whatsapp_number,
         register_no: candidateData.register_no || candidateData.registration_number
       };
+
+      // Handle resume file if provided
+      if (resumeFile) {
+        const { relativePath } = await fileStorageUtil.storeFile('Resume', resumeFile);
+        normalized.resume_url = relativePath;
+        normalized.resume_filename = resumeFile.originalname;
+      }
 
       // Validate required fields
       if (!normalized.email || !normalized.candidate_name || !normalized.organization_id) {
@@ -37,43 +117,169 @@ class CandidateService {
       }
 
       // Check if email already exists for this organization
-      const emailExists = await CandidateModel.emailExists(
+      let existingCandidate = await CandidateModel.getCandidateByEmail(
         normalized.email,
         normalized.organization_id
       );
 
-      if (emailExists) {
-        throw new Error('Candidate with this email already exists in this organization');
+      if (existingCandidate) {
+        // If candidate exists but has NO resume, and we just uploaded one, UPDATE it.
+        if (normalized.resume_url && !existingCandidate.resume_url) {
+          await db.query(
+            `UPDATE candidates_db.college_candidates SET resume_url = ?, resume_filename = ?, updated_at = NOW() WHERE candidate_id = ?`,
+            [normalized.resume_url, normalized.resume_filename, existingCandidate.candidate_id]
+          );
+          // Refresh existingCandidate
+          existingCandidate = await CandidateModel.getCandidateByEmail(normalized.email, normalized.organization_id);
+        }
+
+        return {
+          success: true,
+          existed: true,
+          message: 'Candidate already exists. Details fetched successfully.',
+          data: existingCandidate
+        };
       }
 
-      // Create candidate
-      const candidateId = await CandidateModel.createCandidate(normalized);
+      // Check if this candidate exists globally (registered independently / org_id is NULL)
+      const unclaimedCandidate = await CandidateModel.getCandidateByEmailGlobal(normalized.email);
+      if (unclaimedCandidate) {
+        // Claim the candidate — update their org AND all submitted fields
+        await db.query(
+          `UPDATE candidates_db.college_candidates 
+           SET 
+             organization_id = ?,
+             candidate_name = COALESCE(?, candidate_name),
+             mobile_number  = COALESCE(?, mobile_number),
+             register_no    = COALESCE(?, register_no),
+             dept_id        = COALESCE(?, dept_id),
+             branch_id      = COALESCE(?, branch_id),
+             department     = COALESCE(?, department),
+             semester       = COALESCE(?, semester),
+             year_of_passing= COALESCE(?, year_of_passing),
+             location       = COALESCE(?, location),
+             status         = COALESCE(?, status),
+             resume_url     = COALESCE(?, resume_url),
+             resume_filename = COALESCE(?, resume_filename),
+             candidate_created_by = COALESCE(?, candidate_created_by),
+             updated_at     = NOW()
+           WHERE candidate_id = ?`,
+          [
+            normalized.organization_id,
+            normalized.candidate_name || null,
+            normalized.mobile_number || null,
+            normalized.register_no || null,
+            normalized.dept_id || null,
+            normalized.branch_id || null,
+            normalized.department_name || normalized.department || null,
+            normalized.semester != null ? normalized.semester : null,
+            normalized.year_of_passing || null,
+            normalized.location || null,
+            normalized.status || null,
+            normalized.resume_url || null,
+            normalized.resume_filename || null,
+            normalized.candidate_created_by || null,
+            unclaimedCandidate.candidate_id
+          ]
+        );
+        // Refresh to return the fully updated record
+        const updatedCandidate = await CandidateModel.getCandidateByEmail(normalized.email, normalized.organization_id);
+        return {
+          success: true,
+          existed: true,
+          claimed: true,
+          message: 'Candidate found and linked to your organization.',
+          data: updatedCandidate || unclaimedCandidate
+        };
+      }
+
+      // Create new candidate
+      const candidateId = await CandidateModel.createCandidate(normalized, tenantDb);
 
       // Fetch and return the created candidate
       const candidate = await CandidateModel.getCandidateById(
         candidateId,
-        normalized.organization_id
+        normalized.organization_id,
+        tenantDb
       );
+
+      // Log activity
+      try {
+        const tenantDb = normalized.tenant_db || normalized.tenantDb;
+        if (tenantDb) {
+          await ActivityLogService.logActivity(tenantDb, {
+            organizationId: normalized.organization_id,
+            actorId: normalized.candidate_created_by,
+            actorName: normalized.createdBy_name || 'Admin', // In a real app, I'd fetch actor name from auth_db
+            actorRole: 'Admin',
+            activityType: 'CANDIDATE_ADDED',
+            activityTitle: 'New Candidate Added',
+            activityDescription: `${normalized.candidate_name} was added as a new candidate`,
+            entityId: candidateId,
+            entityType: 'CANDIDATE',
+            metadata: {
+              candidateName: normalized.candidate_name,
+              email: normalized.email,
+              positionName: normalized.position_name || ''
+            }
+          });
+        }
+      } catch (logErr) {
+        console.warn('[CandidateService] Activity logging failed:', logErr.message);
+      }
+
+      // Provision user account in auth_db for the candidate so they can login with a password
+      let tempPassword = Math.random().toString(36).slice(-8); // Simple 8-char random password
+      try {
+        const hashedPassword = await bcrypt.hash(tempPassword, 10);
+        const authCandidateId = uuidv4();
+        
+        // Insert into auth_db.candidate_login
+        await db.authQuery(
+          `INSERT INTO candidate_login (id, email, mobile_number, password_hash, name, organization_id, is_active, created_at, updated_at) 
+           VALUES (?, ?, ?, ?, ?, ?, true, NOW(), NOW())`,
+          [authCandidateId, normalized.email, normalized.mobile_number, hashedPassword, normalized.candidate_name, normalized.organization_id]
+        );
+        
+        console.log(`[CandidateService] Provisioned candidate_login account for ${normalized.email}`);
+        
+        // 2. Send invitation email
+        const loginUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_LINK_BASE_URL || '').trim();
+        const adminName = normalized.createdBy_name || 'Your College Admin';
+        
+        await emailService.sendCandidateInvitationEmail(
+          normalized.email,
+          normalized.candidate_name,
+          adminName,
+          tempPassword,
+          loginUrl
+        );
+      } catch (authErr) {
+        // If user already exists in auth_db, we might get an error. 
+        // We log it but don't fail the whole candidate creation.
+        console.warn('[CandidateService] Auth provisioning/email failed:', authErr.message);
+      }
 
       return {
         success: true,
         message: 'Candidate created successfully',
         data: candidate
       };
+
     } catch (error) {
       throw error;
     }
   }
 
   // Get candidate by ID with full details (assessments from candidate_assessments if table exists; else [])
-  static async getCandidateById(candidateId, organizationId) {
-    const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+  static async getCandidateById(candidateId, organizationId, tenantDb) {
+    const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
     if (!candidate) {
       throw new Error('Candidate not found');
     }
     let assessments = [];
     try {
-      assessments = await CandidateModel.getCandidateAssessments(candidateId, organizationId) || [];
+      assessments = await CandidateModel.getCandidateAssessments(candidateId, organizationId, tenantDb) || [];
     } catch (_) {
       // candidate_assessments table may not exist (e.g. in candidates_db); return candidate without assessments
     }
@@ -99,8 +305,8 @@ class CandidateService {
    * Supports storage path: qwikhire-prod-storage/6464-0160-2190-198-79266/Resume (relativePath in DB)
    * and legacy: resume_url like /uploads/resumes/...
    */
-  static async getCandidateResume(candidateId, organizationId) {
-    const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+  static async getCandidateResume(candidateId, organizationId, tenantDb) {
+    const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
     if (!candidate) throw new Error('Candidate not found');
     const resumeUrl = candidate.resume_url;
     const resumeFilename = candidate.resume_filename || 'resume.pdf';
@@ -120,9 +326,9 @@ class CandidateService {
   }
 
   // Get all candidates with advanced filters and pagination
-  static async getAllCandidates(filters) {
+  static async getAllCandidates(filters, tenantDb) {
     try {
-      const result = await CandidateModel.getAllCandidates(filters);
+      const result = await CandidateModel.getAllCandidates(filters, tenantDb);
 
       return {
         success: true,
@@ -136,19 +342,25 @@ class CandidateService {
   }
 
   // Get students (college_candidates) for organization - for Students page (college admin)
-  static async getStudents(filters) {
-    const result = await CandidateModel.getAllCandidates(filters);
+  static async getStudents(filters, tenantDb) {
+    const result = await CandidateModel.getAllCandidates(filters, tenantDb);
     return {
       success: true,
       message: 'Students retrieved successfully',
-      data: result.data,
+      data: result.data || [],
       pagination: result.pagination
     };
   }
 
+  // Get unique batches for students
+  static async getUniqueBatches(organizationId) {
+    const batches = await CandidateModel.getUniqueBatches(organizationId);
+    return { success: true, data: batches };
+  }
+
   // Get student counts by status (All, Pending, Active, Inactive)
-  static async getStudentCounts(organizationId) {
-    const counts = await CandidateModel.getStudentCounts(organizationId);
+  static async getStudentCounts(organizationId, createdBy = null, tenantDb) {
+    const counts = await CandidateModel.getStudentCounts(organizationId, createdBy, tenantDb);
     return { success: true, data: counts };
   }
 
@@ -200,17 +412,17 @@ class CandidateService {
   static async getAllLinkedCandidates(filters, tenantDb) {
     try {
       const result = await CandidateModel.getAllLinkedCandidates(filters, tenantDb);
-      const content = (result.data || []).map((row) => CandidateService.toCandidatePositionDTO(row));
+      const content = (result.content || []).map((row) => CandidateService.toCandidatePositionDTO(row));
 
       return {
         success: true,
         message: 'Linked candidates retrieved successfully',
         content,
-        page: result.pagination.page,
-        size: result.pagination.pageSize,
-        totalElements: result.pagination.total,
-        totalPages: result.pagination.totalPages,
-        last: !result.pagination.hasNextPage
+        page: result.page ?? 0,
+        size: result.size ?? 10,
+        totalElements: result.totalElements ?? 0,
+        totalPages: result.totalPages ?? 0,
+        last: result.last ?? true
       };
     } catch (error) {
       throw error;
@@ -232,17 +444,24 @@ class CandidateService {
   }
 
   // Update candidate details
-  static async updateCandidate(candidateId, organizationId, updateData) {
+  static async updateCandidate(candidateId, organizationId, updateData, tenantDb, resumeFile) {
     try {
       const normalizedUpdate = {
         ...updateData,
-        email: updateData.email || updateData.candidate_email,
-        mobile_number: updateData.mobile_number || updateData.candidate_mobile_number,
+        email: (updateData.email || updateData.candidate_email || '').trim().toLowerCase(),
+        mobile_number: updateData.mobile_number || updateData.candidate_mobile_number || updateData.whatsapp_number,
         register_no: updateData.register_no || updateData.registration_number
       };
 
+      // Handle resume file if provided
+      if (resumeFile) {
+        const { relativePath } = await fileStorageUtil.storeFile('Resume', resumeFile);
+        normalizedUpdate.resume_url = relativePath;
+        normalizedUpdate.resume_filename = resumeFile.originalname;
+      }
+
       // Check if candidate exists
-      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
       if (!candidate) {
         throw new Error('Candidate not found');
       }
@@ -251,7 +470,8 @@ class CandidateService {
       if (normalizedUpdate.email && normalizedUpdate.email !== candidate.email) {
         const emailExists = await CandidateModel.emailExists(
           normalizedUpdate.email,
-          organizationId
+          organizationId,
+          tenantDb
         );
         if (emailExists) {
           throw new Error('Email already exists for another candidate');
@@ -259,14 +479,14 @@ class CandidateService {
       }
 
       // Update candidate
-      const updated = await CandidateModel.updateCandidate(candidateId, organizationId, normalizedUpdate);
+      const updated = await CandidateModel.updateCandidate(candidateId, organizationId, normalizedUpdate, tenantDb);
 
       if (!updated) {
         throw new Error('Failed to update candidate');
       }
 
       // Fetch updated candidate
-      const updatedCandidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const updatedCandidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
 
       return {
         success: true,
@@ -279,9 +499,9 @@ class CandidateService {
   }
 
   // Update internal notes
-  static async updateInternalNotes(candidateId, organizationId, notes, notesBy) {
+  static async updateInternalNotes(candidateId, organizationId, notes, notesBy, tenantDb) {
     try {
-      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
       if (!candidate) {
         throw new Error('Candidate not found');
       }
@@ -290,7 +510,8 @@ class CandidateService {
         candidateId,
         organizationId,
         notes,
-        notesBy
+        notesBy,
+        tenantDb
       );
 
       if (!updated) {
@@ -310,7 +531,7 @@ class CandidateService {
   }
 
   // Update candidate status
-  static async updateCandidateStatus(candidateId, organizationId, newStatus, changedBy, remarks) {
+  static async updateCandidateStatus(candidateId, organizationId, newStatus, changedBy, remarks, tenantDb) {
     try {
       // Validate status
       const validStatuses = Object.values(CANDIDATE_STATUSES);
@@ -319,7 +540,7 @@ class CandidateService {
       }
 
       // Check if candidate exists
-      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
       if (!candidate) {
         throw new Error('Candidate not found');
       }
@@ -330,7 +551,8 @@ class CandidateService {
         organizationId,
         newStatus,
         changedBy,
-        remarks
+        remarks,
+        tenantDb
       );
 
       if (!updated) {
@@ -338,7 +560,7 @@ class CandidateService {
       }
 
       // Fetch updated candidate
-      const updatedCandidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const updatedCandidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
 
       return {
         success: true,
@@ -351,14 +573,14 @@ class CandidateService {
   }
 
   // Delete candidate
-  static async deleteCandidate(candidateId, organizationId) {
+  static async deleteCandidate(candidateId, organizationId, tenantDb) {
     try {
-      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
       if (!candidate) {
         throw new Error('Candidate not found');
       }
 
-      const deleted = await CandidateModel.deleteCandidate(candidateId, organizationId);
+      const deleted = await CandidateModel.deleteCandidate(candidateId, organizationId, tenantDb);
 
       if (!deleted) {
         throw new Error('Failed to delete candidate');
@@ -383,7 +605,7 @@ class CandidateService {
       }
 
       // Check if candidate exists
-      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
       if (!candidate) {
         throw new Error('Candidate not found');
       }
@@ -418,14 +640,14 @@ class CandidateService {
   }
 
   // Get assessments for candidate
-  static async getCandidateAssessments(candidateId, organizationId) {
+  static async getCandidateAssessments(candidateId, organizationId, tenantDb) {
     try {
-      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
       if (!candidate) {
         throw new Error('Candidate not found');
       }
 
-      const assessments = await CandidateModel.getCandidateAssessments(candidateId, organizationId);
+      const assessments = await CandidateModel.getCandidateAssessments(candidateId, organizationId, tenantDb);
 
       return {
         success: true,
@@ -438,9 +660,9 @@ class CandidateService {
   }
 
   // Create assessment record for candidate
-  static async createAssessment(candidateId, organizationId, assessmentData) {
+  static async createAssessment(candidateId, organizationId, assessmentData, tenantDb) {
     try {
-      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
       if (!candidate) {
         throw new Error('Candidate not found');
       }
@@ -451,7 +673,7 @@ class CandidateService {
         ...assessmentData
       };
 
-      const assessmentId = await CandidateModel.createAssessment(fullAssessmentData);
+      const assessmentId = await CandidateModel.createAssessment(fullAssessmentData, tenantDb);
 
       return {
         success: true,
@@ -466,7 +688,7 @@ class CandidateService {
   // Map candidate to position
   static async mapCandidateToPosition(candidateId, organizationId, positionData, tenantDb) {
     try {
-      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
       if (!candidate) {
         throw new Error('Candidate not found');
       }
@@ -480,7 +702,6 @@ class CandidateService {
       };
 
       const positionCandidateId = await CandidateModel.createCandidatePosition(fullPositionData, tenantDb);
-
       return {
         success: true,
         message: 'Candidate mapped to position successfully',
@@ -548,7 +769,7 @@ class CandidateService {
   }
 
   // Backward-compatible: Get candidates assigned to a specific position (legacy table)
-  static async getCandidatesByPosition(tenantDb, positionId, limit = 5, offset = 0, userId = null) {
+  static async getCandidatesByPosition(tenantDb, positionId, limit = 5, offset = 0, userId = null, dataFilter = {}) {
     let resolvedTenantDb = tenantDb;
 
     if (!resolvedTenantDb || resolvedTenantDb === 'auth_db' || resolvedTenantDb === 'superadmin_db') {
@@ -578,8 +799,16 @@ class CandidateService {
     const existingTables = tableCheck.map(t => t.TABLE_NAME);
 
     if (existingTables.includes('candidate_positions')) {
-      const countQuery = `SELECT COUNT(*) as total FROM \`${resolvedTenantDb}\`.candidate_positions WHERE position_id = ?`;
-      const countResult = await db.query(countQuery, [positionId]);
+      let whereClause = 'WHERE cp.position_id = ?';
+      const params = [positionId];
+
+      if (dataFilter.createdBy) {
+        whereClause += ' AND cp.created_by = ?';
+        params.push(dataFilter.createdBy);
+      }
+
+      const countQuery = `SELECT COUNT(*) as total FROM \`${resolvedTenantDb}\`.candidate_positions cp ${whereClause}`;
+      const countResult = await db.query(countQuery, params);
       const totalElements = countResult[0]?.total || 0;
 
       const selectQuery = `
@@ -590,16 +819,17 @@ class CandidateService {
           c.email as email,
           cp.candidate_code as code,
           cp.status as status,
-          cp.invited_date as assignedAt
+          cp.invited_date as assignedAt,
+          cp.resume_score as resumeMatchScore
         FROM \`${resolvedTenantDb}\`.candidate_positions cp
         LEFT JOIN candidates_db.college_candidates c ON c.candidate_id = cp.candidate_id
-        WHERE cp.position_id = ?
+        ${whereClause}
         ORDER BY cp.created_at DESC
         LIMIT ? OFFSET ?
       `;
 
       const candidates = await db.query(selectQuery, [
-        positionId,
+        ...params,
         parseInt(limit),
         parseInt(offset)
       ]);
@@ -623,8 +853,16 @@ class CandidateService {
       return { content: [], totalElements: 0 };
     }
 
-    const countQuery = `SELECT COUNT(*) as total FROM \`${resolvedTenantDb}\`.\`${tableName}\` WHERE \`${fkColumn}\` = UNHEX(?)`;
-    const countResult = await db.query(countQuery, [positionIdHex]);
+    let whereClause = `WHERE pc.\`${fkColumn}\` = UNHEX(?)`;
+    const params = [positionIdHex];
+
+    if (dataFilter.createdBy) {
+      whereClause += ' AND pc.interview_scheduled_by = ?';
+      params.push(dataFilter.createdBy);
+    }
+
+    const countQuery = `SELECT COUNT(*) as total FROM \`${resolvedTenantDb}\`.\`${tableName}\` pc ${whereClause}`;
+    const countResult = await db.query(countQuery, params);
     const totalElements = countResult[0]?.total || 0;
 
     const selectQuery = `
@@ -634,16 +872,17 @@ class CandidateService {
         c.email,
         c.code,
         pc.recommendation as status,
-        pc.created_at as assignedAt
+        pc.created_at as assignedAt,
+        pc.resume_match_score as resumeMatchScore
       FROM \`${resolvedTenantDb}\`.\`${tableName}\` pc
       JOIN \`${resolvedTenantDb}\`.candidates c ON pc.candidate_id = c.id
-      WHERE pc.\`${fkColumn}\` = UNHEX(?)
+      ${whereClause}
       ORDER BY pc.created_at DESC
       LIMIT ? OFFSET ?
     `;
 
     const candidates = await db.query(selectQuery, [
-      positionIdHex,
+      ...params,
       parseInt(limit),
       parseInt(offset)
     ]);
@@ -761,6 +1000,25 @@ class CandidateService {
         // Fetch to get the auto-generated candidate_code
         resolvedCandidate = await CandidateModel.getCandidateById(candidateId, organizationId);
         console.log(`DEBUG: Created new candidate ${candidateId} for email ${candidateEmail}`);
+
+        // Provision user account in auth_db for the candidate
+        let tempPassword = Math.random().toString(36).slice(-8);
+        try {
+          const hashedPassword = await bcrypt.hash(tempPassword, 10);
+          const authCandidateId = uuidv4();
+          
+          await db.authQuery(
+            `INSERT INTO candidate_login (id, email, mobile_number, password_hash, name, organization_id, is_active, created_at, updated_at) 
+             VALUES (?, ?, ?, ?, ?, ?, true, NOW(), NOW())`,
+            [authCandidateId, candidateEmail, mobileNumber, hashedPassword, candidateName, organizationId]
+          );
+          
+          // Store tempPassword in the data object so it can be used in the email below
+          finalData.generatedPassword = tempPassword;
+          console.log(`[CandidateService] Provisioned candidate_login account for ${candidateEmail}`);
+        } catch (authErr) {
+          console.warn('[CandidateService] Auth provisioning failed in private link:', authErr.message);
+        }
       }
 
       // STEP 2: Create private link or reuse existing (when status is Invited and candidate already in private link)
@@ -796,12 +1054,100 @@ class CandidateService {
       }
 
       // STEP 2b: Send test invite email via Zepto (config from Superadmin GET /superadmin/settings/email)
-      const testPortalUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_TEST_PORTAL_URL || process.env.CANDIDATE_LINK_BASE_URL || '').trim() || 'your test portal';
-      const inviteSubject = `You're invited to take the assessment – ${finalData.position_name || positionName || 'Assessment'}`;
-      const inviteBody = `<p>Hi ${candidateName},</p><p>You have been invited to take an assessment for the position: <strong>${finalData.position_name || positionName || 'Assessment'}</strong> at ${finalData.company_name || finalData.companyName || 'our organization'}.</p><p>Your verification code is: <strong>${verificationCode}</strong></p><p>Take your test at: <a href="${testPortalUrl}">${testPortalUrl}</a></p><p>Enter your email and this verification code to start. The link is valid until ${linkExpiresAt.toISOString ? linkExpiresAt.toISOString().slice(0, 10) : linkExpiresAt}.</p>`;
+      const testPortalUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_LINK_BASE_URL || '').trim() || 'your test portal';
+      const inviteSubject = `Invitation to join KareerGrowth from ${finalData.company_name || 'your College'}`;
+      
+      let inviteBody = `<p>Hi ${candidateName},</p><p>You have been invited to join the <strong>KareerGrowth</strong> platform by your college administrator.</p>`;
+      
+      if (finalData.generatedPassword) {
+        inviteBody += `
+          <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #ddd;">
+              <p style="margin: 0;"><strong>Your Login Credentials:</strong></p>
+              <p style="margin: 10px 0 0 0;">Email: <span style="color: #2e7d32;">${candidateEmail}</span></p>
+              <p style="margin: 5px 0 0 0;">Password: <span style="color: #2e7d32;">${finalData.generatedPassword}</span></p>
+          </div>
+          <p>Login here: <a href="${testPortalUrl}">${testPortalUrl}</a></p>
+        `;
+      } else {
+        inviteBody += `<p>You have been invited to take an assessment for the position: <strong>${finalData.position_name || positionName || 'Assessment'}</strong>.</p><p>Your verification code is: <strong>${verificationCode}</strong></p><p>Take your test at: <a href="${testPortalUrl}">${testPortalUrl}</a></p>`;
+      }
+      
       const inviteResult = await emailService.sendEmail(candidateEmail, inviteSubject, inviteBody);
+      
+      // Log single email activity
+      try {
+        const ActivityLogService = require('./activityLogService');
+        await ActivityLogService.logActivity(tenantDb, {
+            organizationId,
+            actorId: userId,
+            actorName: finalData.actorName || 'Admin',
+            actorRole: 'ADMIN',
+            activityType: 'SINGLE_EMAIL',
+            activityTitle: `Invitation sent to ${candidateName}`,
+            activityDescription: `Assessment invitation email for position: ${finalData.position_name || positionName || 'Assessment'}`,
+            entityId: candidateId,
+            entityType: 'CANDIDATE',
+            metadata: {
+                recipient: candidateEmail,
+                subject: inviteSubject,
+                status: inviteResult.sent ? 'SENT' : 'FAILED',
+                error: inviteResult.error || null,
+                positionName: finalData.position_name || positionName || 'Assessment',
+                positionId: positionId, // Added positionId
+                candidateId: candidateId // Added candidateId explicitly
+            }
+        });
+      } catch (logErr) {
+        console.warn('[CandidateService] Single email activity logging failed:', logErr.message);
+      }
+
       if (!inviteResult.sent) {
         console.warn('[CandidateService] Test invite email not sent:', inviteResult.error);
+      }
+
+      // STEP 2c: Send test invite via WhatsApp (config from Superadmin GET /superadmin/settings/whatsapp)
+      if (mobileNumber) {
+        try {
+            const waBodyValues = [
+                candidateName,
+                finalData.position_name || positionName || 'Assessment',
+                finalData.company_name || 'your College',
+                testPortalUrl,
+                verificationCode
+            ];
+            const waResult = await whatsappService.sendWhatsAppMessage(mobileNumber, waBodyValues);
+            
+            // Log WhatsApp activity
+            try {
+                await ActivityLogService.logActivity(tenantDb, {
+                    organizationId,
+                    actorId: userId,
+                    actorName: finalData.actorName || 'Admin',
+                    actorRole: 'ADMIN',
+                    activityType: 'WHATSAPP_MESSAGE',
+                    activityTitle: `WhatsApp invitation sent to ${candidateName}`,
+                    activityDescription: `Assessment invitation WhatsApp for position: ${finalData.position_name || positionName || 'Assessment'}`,
+                    entityId: candidateId,
+                    entityType: 'CANDIDATE',
+                    metadata: {
+                        recipient: mobileNumber,
+                        status: waResult.sent ? 'SENT' : 'FAILED',
+                        error: waResult.error || null,
+                        positionName: finalData.position_name || positionName || 'Assessment',
+                        positionId: positionId,
+                        candidateId: candidateId
+                    }
+                });
+            } catch (logErr) {
+                console.warn('[CandidateService] WhatsApp activity logging failed:', logErr.message);
+            }
+
+            if (!waResult.sent) {
+                console.warn('[CandidateService] WhatsApp invitation not sent:', waResult.error);
+            }
+        } catch (waErr) {
+            console.warn('[CandidateService] WhatsApp invitation error:', waErr.message);
+        }
       }
 
       // STEP 3: Create candidate-position relationship (Position mapping)
@@ -860,6 +1206,32 @@ class CandidateService {
           };
 
           assessmentSummaryObj = await CandidateModel.createAssessmentSummary(summaryData);
+
+          // Create notifications for the specific candidate
+          try {
+            const mongoDb = await getDb();
+            const posTitle = positionName || finalData.position_name || 'Assessment';
+            
+            // 1. Test Assigned Notification
+            await mongoDb.collection(COLLECTIONS.NOTIFICATIONS).insertOne({
+                candidateId,
+                message: `You have been assigned to the assessment for: "${posTitle}". Check your email for details.`,
+                type: 'test_assigned',
+                createdAt: new Date(),
+                dismissed: false
+            });
+
+            // 2. Credit Utilized Notification (Interview Credit)
+            await mongoDb.collection(COLLECTIONS.NOTIFICATIONS).insertOne({
+                candidateId,
+                message: `1 Interview Credit has been utilized for your: "${posTitle}" assessment.`,
+                type: 'credit_utilization',
+                createdAt: new Date(),
+                dismissed: false
+            });
+          } catch (mongoErr) {
+            console.warn('[CandidateService] Failed to create MongoDB notifications:', mongoErr.message);
+          }
         } catch (summError) {
           console.warn('Warning: Failed to create assessment summary:', summError.message);
         }
@@ -916,13 +1288,15 @@ class CandidateService {
   }
 
   // Get candidate by email
-  static async getCandidateByEmail(email, organizationId) {
+  static async getCandidateByEmail(email, organizationId, tenantDb) {
     try {
-      const candidate = await CandidateModel.getCandidateByEmail(email, organizationId);
+      const candidate = await CandidateModel.getCandidateByEmail(email, organizationId, tenantDb || 'candidates_db');
+
       return {
         success: true,
         message: candidate ? 'Candidate found' : 'Candidate not found',
-        data: candidate || null
+        data: candidate || null,
+        isGlobal: false
       };
     } catch (error) {
       console.error('Error in getCandidateByEmail:', error);
@@ -943,6 +1317,36 @@ class CandidateService {
       };
     } catch (error) {
       console.error('Error in checkWhatsAppAvailability:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Check if a valid public link exists for a given position
+   */
+  static async checkPublicLinkExists(positionId, user) {
+    try {
+      if (!positionId || !user || !user.organizationId) {
+        return { success: true, exists: false };
+      }
+      const positionIdBinary = Buffer.from(positionId.replace(/-/g, ''), 'hex');
+      
+      const query = `
+        SELECT id 
+        FROM candidates_db.public_link 
+        WHERE client_id = ? 
+          AND position_id = ? 
+          AND (expire_at IS NULL OR expire_at > NOW())
+        LIMIT 1
+      `;
+      const rows = await db.query(query, [user.organizationId, positionIdBinary]);
+      
+      return {
+        success: true,
+        exists: rows.length > 0
+      };
+    } catch (error) {
+      console.error('Error checking public link existence:', error);
       throw error;
     }
   }
@@ -1043,6 +1447,7 @@ class CandidateService {
         tenant_id: tenantId, // Explicitly store the DB name
         position_id: data.position_id,
         question_set_id: data.question_set_id,
+        question_section_id: data.question_section_id,
         short_code: shortCode,
         link: `${FRONTEND_URL}/register/${shortCode}`,
         active_at: data.link_start_datetime ? new Date(data.link_start_datetime) : new Date(),
@@ -1226,6 +1631,7 @@ class CandidateService {
           organization_name: activeOrgId, // Use Org ID as display name per request
           position_id: positionIdClean,
           question_set_id: questionSetIdClean,
+          question_section_id: link.question_section_id ? (Buffer.isBuffer(link.question_section_id) ? link.question_section_id.toString('hex') : link.question_section_id) : null,
           position_name: positionName,
           question_set_name: questionSetName,
           link_created: link.created_at,
@@ -1284,6 +1690,7 @@ class CandidateService {
           organization_id: data.organization_id,
           candidate_name: data.candidate_name,
           question_set_id: data.question_set_id,
+          question_section_id: data.question_section_id,
           status: 'Applied',
           created_by: null
         };
@@ -1337,6 +1744,7 @@ class CandidateService {
                 minimum_experience as minimumExperience, maximum_experience as maximumExperience,
                 no_of_positions as noOfPositions, position_status as status,
                 expected_start_date as expectedStartDate, application_deadline as applicationDeadline,
+                job_description as jobDescription,
                 job_description_document_path as jobDescriptionDocumentPath,
                 job_description_document_file_name as jobDescriptionDocumentFileName
               FROM \`${dbName}\`.positions WHERE HEX(id) = ? LIMIT 1
@@ -1359,6 +1767,7 @@ class CandidateService {
                   experience_min as minimumExperience, experience_max as maximumExperience,
                   no_of_positions as noOfPositions, status as status,
                   expected_start_date as expectedStartDate, application_deadline as applicationDeadline,
+                  job_description as jobDescription,
                   job_description_document_path as jobDescriptionDocumentPath,
                   job_description_document_file_name as jobDescriptionDocumentFileName
                 FROM \`${dbName}\`.jobs WHERE HEX(id) = ? LIMIT 1
@@ -1413,6 +1822,500 @@ class CandidateService {
     } catch (error) {
       console.error('Error fetching public position details:', error);
       throw error;
+    }
+  }
+
+  // Get public job description document (no auth required)
+  static async getPublicJobDescription(positionId, organizationId) {
+    try {
+      const positionIdClean = positionId.replace(/-/g, '');
+      const orgClients = await db.query(
+        `SELECT DISTINCT client FROM auth_db.users WHERE organization_id = ? AND client IS NOT NULL`,
+        [organizationId]
+      );
+
+      if (orgClients.length === 0) {
+        throw new Error('Organization not found');
+      }
+
+      let position = null;
+      let targetDb = null;
+
+      for (const row of orgClients) {
+        const dbName = row.client;
+        try {
+          const posRows = await db.query(
+            `SELECT job_description_document_path as path, job_description_document_file_name as fileName
+             FROM \`${dbName}\`.positions WHERE HEX(id) = ? LIMIT 1`,
+            [positionIdClean]
+          );
+          if (posRows && posRows.length > 0) {
+            position = posRows[0];
+            targetDb = dbName;
+            break;
+          }
+          const jobRows = await db.query(
+            `SELECT job_description_document_path as path, job_description_document_file_name as fileName
+             FROM \`${dbName}\`.jobs WHERE HEX(id) = ? LIMIT 1`,
+            [positionIdClean]
+          );
+          if (jobRows && jobRows.length > 0) {
+            position = jobRows[0];
+            targetDb = dbName;
+            break;
+          }
+        } catch (e) { /* table missing */ }
+      }
+
+      if (!position) {
+        throw new Error('Position not found');
+      }
+      if (!position.path) {
+        throw new Error('No job description document available');
+      }
+
+      const buffer = await fileStorageUtil.getFile(position.path);
+      return { buffer, filename: position.fileName || 'document.pdf' };
+    } catch (error) {
+      console.error('Error fetching public job description document:', error);
+      throw error;
+    }
+  }
+
+  // Check if candidate exists globally for Student Registration flow
+  static async checkGlobalCandidate(email, organizationId) {
+    try {
+      const result = await CandidateModel.checkGlobalCandidateExists(email, organizationId);
+      if (result.exists) {
+        return { 
+          success: true, 
+          exists: true, 
+          college_name: result.college_name,
+          is_independent: result.is_independent
+        };
+      }
+      return { success: true, exists: false };
+    } catch (error) {
+      console.error('Error in checkGlobalCandidate:', error);
+      throw error;
+    }
+  }
+
+  // Verify global candidate by matching mobile number
+  static async verifyGlobalByMobile(email, mobile, organizationId) {
+    try {
+      const candidate = await CandidateModel.getGlobalCandidateByMobile(email, mobile, organizationId);
+      if (candidate) {
+        return {
+          success: true,
+          message: 'Profile verified successfully via mobile',
+          data: candidate
+        };
+      }
+      return {
+        success: false,
+        message: 'Mobile number does not match our records'
+      };
+    } catch (error) {
+      console.error('Error in verifyGlobalByMobile:', error);
+      throw error;
+    }
+  }
+
+  // Send OTP for global profile identification
+  static async sendGlobalVerificationOTP(email) {
+    try {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      await CandidateModel.saveGlobalVerificationOTP(email, otp);
+
+      const subject = 'Verification Code for Your Profile';
+      const htmlBody = `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
+          <h2 style="color: #2e7d32;">Hello!</h2>
+          <p>You are receiving this email because someone is attempting to link your Systemmindz profile to an organization.</p>
+          <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0; text-align: center;">
+            <p style="margin: 0; font-size: 1.2em; letter-spacing: 5px; font-weight: bold; color: #2e7d32;">${otp}</p>
+          </div>
+          <p>Please provide this 6-digit code to the administrator to confirm your identity.</p>
+          <p>This code will expire in 10 minutes.</p>
+          <p style="margin-top: 30px; font-size: 0.9em; color: #777;">
+            If you did not request this, please ignore this email.<br>
+            Best regards,<br>
+            Team KareerGrowth
+          </p>
+        </div>
+      `;
+      
+      const emailRes = await emailService.sendEmail(email, subject, htmlBody);
+      if (emailRes.sent) {
+        return { success: true, message: 'OTP sent to your email' };
+      } else {
+        throw new Error(emailRes.error || 'Failed to send email');
+      }
+    } catch (error) {
+      console.error('Error in sendGlobalVerificationOTP:', error);
+      throw error;
+    }
+  }
+
+  // Verify OTP and return full candidate details
+  static async verifyGlobalByOTP(email, code, organizationId) {
+    try {
+      console.log(`[CandidateService] Verifying OTP for ${email}, code: ${code}, currentOrg: ${organizationId}`);
+      const isValid = await CandidateModel.verifyGlobalVerificationOTP(email, code);
+      console.log(`[CandidateService] OTP validity: ${isValid}`);
+      
+      if (isValid) {
+        const candidate = await CandidateModel.getFullGlobalCandidateByEmail(email, organizationId);
+        console.log(`[CandidateService] Candidate found after OTP: ${candidate ? 'YES' : 'NO'}`);
+        return {
+          success: true,
+          message: 'Profile verified successfully via OTP',
+          data: candidate
+        };
+      }
+      return {
+        success: false,
+        message: 'Invalid or expired verification code'
+      };
+    } catch (error) {
+      console.error('Error in verifyGlobalByOTP:', error);
+      throw error;
+    }
+  }
+
+  static async getAcademicMetadata(tenantDb, organizationId) {
+    return await CandidateModel.getAcademicMetadata(tenantDb, organizationId);
+  }
+
+  static async getCandidatesForBulkEmail(tenantDb, organizationId, filters) {
+    return await CandidateModel.getCandidatesForBulkEmail(tenantDb, organizationId, filters);
+  }
+
+  static async sendBulkEmail(tenantDb, organizationId, recipients, subject, body, cc, templateName, activityId) {
+    const results = {
+      total: recipients.length,
+      sent: 0,
+      failed: 0,
+      pending: recipients.length,
+      status: 'SENDING',
+      errors: [],
+      templateName: templateName
+    };
+
+    const publicLinkCache = {};
+
+    for (const recipient of recipients) {
+      try {
+        // Resolve Public Link if missing
+        let publicLink = recipient.public_link || '';
+        if (!publicLink && recipient.position_id) {
+            if (publicLinkCache[recipient.position_id]) {
+                publicLink = publicLinkCache[recipient.position_id];
+            } else {
+                try {
+                    const posIdHex = String(recipient.position_id).replace(/-/g, '');
+                    const [plRow] = await db.query(
+                        `SELECT link, expires_at FROM \`${tenantDb}\`.public_link WHERE position_id = UNHEX(?) LIMIT 1`,
+                        [posIdHex]
+                    );
+                    if (plRow) {
+                        const baseUrl = (process.env.CANDIDATE_LINK_BASE_URL || '').replace(/\/$/, '');
+                        if (!baseUrl) {
+                            console.error('CRITICAL: CANDIDATE_LINK_BASE_URL is not set in environment variables');
+                        }
+                        publicLink = `${baseUrl}/${organizationId}/${plRow.link}`;
+                        const expiresAt = plRow.expires_at ? new Date(plRow.expires_at).toLocaleString() : 'N/A';
+                        publicLinkCache[recipient.position_id] = { publicLink, expiresAt };
+                    }
+                } catch (plErr) {
+                    console.warn(`[CandidateService] Public link fetch failed for position ${recipient.position_id}:`, plErr.message);
+                }
+            }
+
+            if (publicLinkCache[recipient.position_id]) {
+                publicLink = publicLinkCache[recipient.position_id].publicLink;
+                recipient.link_expires = publicLinkCache[recipient.position_id].expiresAt;
+            }
+        }
+
+        let personalBody = body || '';
+        let personalSubject = subject || '';
+
+        const mapping = {
+          '{candidate_name}': recipient.name || recipient.candidate_name || 'Candidate',
+          '{candidate_email}': recipient.email || '',
+          '{mobile_number}': recipient.mobile || '',
+          '{reg_number}': recipient.register_no || recipient.reg_number || '',
+          '{department}': recipient.department || '',
+          '{branch}': recipient.branch || '',
+          '{semester}': recipient.semester || '',
+          '{position_code}': recipient.position_code || '',
+          '{Position_title}': recipient.position_title || 'Position',
+          '{company_name}': recipient.company_name || 'Organization',
+          '{public_link}': publicLink,
+           '{link_expires}': recipient.link_expires || 'N/A',
+          '{job_description}': recipient.job_description || '',
+          '{jd_link}': recipient.jd_link || '',
+          '{date}': recipient.date || new Date().toLocaleDateString(),
+          '{time}': recipient.time || '',
+          '{interview_location}': recipient.interview_location || recipient.location || ''
+        };
+
+        Object.entries(mapping).forEach(([key, value]) => {
+          personalBody = personalBody.split(key).join(value || '');
+          personalSubject = personalSubject.split(key).join(value || '');
+        });
+
+        const htmlBody = personalBody.replace(/\r?\n/g, '<br/>');
+
+        console.log(`[CandidateService] Sending email to ${recipient.email} (Activity: ${activityId})`);
+        const result = await emailService.sendEmail(recipient.email, personalSubject, htmlBody, cc);
+        console.log(`[CandidateService] Send result for ${recipient.email}:`, result.sent ? 'SUCCESS' : `FAILED (${result.error})`);
+
+        if (result.sent) {
+          results.sent++;
+        } else {
+          results.failed++;
+          results.errors.push({ 
+            email: recipient.email, 
+            error: result.error,
+            candidateName: recipient.name || recipient.candidate_name,
+            positionTitle: recipient.position_title,
+            timestamp: new Date()
+          });
+        }
+      } catch (err) {
+        results.failed++;
+        results.errors.push({ 
+          email: recipient.email, 
+          error: err.message,
+          candidateName: recipient.name || recipient.candidate_name,
+          positionTitle: recipient.position_title,
+          timestamp: new Date()
+        });
+      } finally {
+        results.pending--;
+        // Update metadata after each email for real-time progress
+        if (tenantDb && activityId) {
+          const progressResults = { ...results };
+          delete progressResults.errors; 
+          await ActivityLogService.updateActivityMetadata(tenantDb, activityId, progressResults);
+        }
+      }
+    }
+
+    results.status = results.failed === results.total ? 'FAILED' : 'COMPLETED';
+    
+    // Save errors to MongoDB if any exist
+    if (results.errors.length > 0) {
+      try {
+        const mongo = require('../config/mongo');
+        const db = await mongo.getDb();
+        const failuresCollection = db.collection('email_log_failures');
+        
+        // Ensure TTL index exists for 72 hour auto-deletion
+        await failuresCollection.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 259200 });
+        
+        const failureDoc = {
+          activityId: activityId,
+          failures: results.errors,
+          totalFailed: results.failed,
+          createdAt: new Date()
+        };
+        
+        const mongoRes = await failuresCollection.insertOne(failureDoc);
+        results.failuresMongoId = mongoRes.insertedId.toString();
+      } catch (mongoErr) {
+        console.error('[MongoDB Failure Logging Error]:', mongoErr);
+        // Fallback: if mongo fails, we'll keep a small subset in MySQL or just logs
+        results.mongoError = true;
+      }
+    }
+
+    // Final update: remove large errors array before saving to MySQL
+    const finalResults = { ...results };
+    delete finalResults.errors; 
+    
+    if (tenantDb && activityId) {
+      await ActivityLogService.updateActivityMetadata(tenantDb, activityId, finalResults);
+      
+      // Cleanup Task: Delete logs older than 72 hours from MySQL (for emails)
+      try {
+        const cutoff = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+        await db.query(
+          `DELETE FROM \`${tenantDb}\`.activity_logs 
+           WHERE activity_type IN ('MASS_EMAIL', 'SINGLE_EMAIL') 
+           AND created_at < ?`, 
+          [cutoff]
+        );
+        console.log(`[CandidateService] Cleanup completed for ${tenantDb}`);
+      } catch (cleanupErr) {
+        console.error('[MySQL Cleanup Error]:', cleanupErr.message);
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Remove candidate mapping from a specific position and send notification email.
+   * Cleans up position_candidates, job_candidates, ats_candidates, and private_link.
+   */
+  static async removeCandidateFromPosition(candidateId, positionId, organizationId, tenantDb) {
+    try {
+      const db = require('../config/db');
+      
+      // 1. Fetch candidate details for notification
+      const candidate = await CandidateModel.getCandidateById(candidateId, organizationId, tenantDb);
+      if (!candidate) throw new Error('Candidate not found');
+
+      // 2. Fetch position title for email
+      const posIdHex = positionId.replace(/-/g, '');
+      const positions = await db.query(
+        `SELECT job_title FROM \`${tenantDb}\`.jobs WHERE id = UNHEX(?) LIMIT 1`,
+        [posIdHex]
+      );
+      const positionTitle = positions[0]?.job_title || 'Position';
+
+      const candIdHex = candidateId.replace(/-/g, '');
+
+      // 3. Perform cleanup across all potential mapping tables
+      // position_candidates
+      await db.query(
+        `DELETE FROM \`${tenantDb}\`.position_candidates WHERE candidate_id = UNHEX(?) AND position_id = UNHEX(?)`,
+        [candIdHex, posIdHex]
+      );
+      
+      // job_candidates
+      await db.query(
+        `DELETE FROM \`${tenantDb}\`.job_candidates WHERE candidate_id = UNHEX(?) AND job_id = UNHEX(?)`,
+        [candIdHex, posIdHex]
+      );
+
+      // ats_candidates
+      await db.query(
+        `DELETE FROM \`${tenantDb}\`.ats_candidates WHERE candidate_id = UNHEX(?) AND job_id = UNHEX(?)`,
+        [candIdHex, posIdHex]
+      );
+      // fallback delete for ats_candidates where ID is used as the application ID
+      await db.query(
+        `DELETE FROM \`${tenantDb}\`.ats_candidates WHERE id = UNHEX(?) AND job_id = UNHEX(?)`,
+        [candIdHex, posIdHex]
+      );
+
+      // candidates_db.private_link
+      await db.query(
+        `DELETE FROM candidates_db.private_link WHERE candidate_id = ? AND position_id = ?`,
+        [candidateId, positionId]
+      );
+
+      // 4. Send the removal email (non-blocking)
+      if (candidate.email) {
+        emailService.sendCandidateRemovalEmail(
+          candidate.email, 
+          candidate.candidate_name || 'Candidate', 
+          positionTitle
+        ).catch(err => console.error('[CandidateService] Failed to send removal email:', err.message));
+      }
+
+      return { success: true, message: `Candidate removed from ${positionTitle}` };
+    } catch (error) {
+      console.error('[CandidateService] removeCandidateFromPosition error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get overall credit status and history for a candidate
+   */
+  static async getCandidateCreditsOverview(candidateId) {
+    try {
+      // 1. Get total purchased credits and current utilization from the new summary table
+      const querySub = `
+        SELECT plan_name, total_credits, utilized_credits, valid_from, valid_till
+        FROM candidates_db.candidate_subscriptions
+        WHERE candidate_id = ? AND status = 'ACTIVE'
+        ORDER BY created_at DESC LIMIT 1
+      `;
+      const subRows = await db.query(querySub, [candidateId]);
+      
+      const planName = subRows[0]?.plan_name || 'N/A';
+      const totalPurchased = subRows[0]?.total_credits || 0;
+      const utilized = subRows[0]?.utilized_credits || 0;
+      const validFrom = subRows[0]?.valid_from;
+      const validTill = subRows[0]?.valid_till;
+
+      // 2. Get detailed usage history from candidates_db.candidate_credits (API Call History)
+      const queryHistory = `
+        SELECT id, service_type, service_name, credits_used, metadata, created_at
+        FROM candidates_db.candidate_credits
+        WHERE candidate_id = ?
+        ORDER BY created_at DESC
+      `;
+      const history = await db.query(queryHistory, [candidateId]);
+
+      return {
+        success: true,
+        planName,
+        totalPurchased,
+        utilized,
+        remaining: Math.max(0, totalPurchased - utilized),
+        validFrom,
+        validTill,
+        history
+      };
+    } catch (error) {
+      console.error('[CandidateService] getCandidateCreditsOverview error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get assessment summary status for stages rounds
+   */
+  static async getAssessmentSummary(candidateId, positionId, tenantDb) {
+    try {
+      // Try to find the assessment summary in the tenant DB if provided
+      // If not, we fall back to logic that checks common tables
+      const results = {
+        round1Assigned: false, round1Completed: false, round1EndTime: null,
+        round2Assigned: false, round2Completed: false, round2EndTime: null,
+        round3Assigned: false, round3Completed: false, round3EndTime: null,
+        round4Assigned: false, round4Completed: false, round4EndTime: null
+      };
+
+      // Query candidate_assessments for this candidate and position
+      // Using candidates_db as default if tenantDb is not standard
+      const dbName = (tenantDb && tenantDb !== 'auth_db' && tenantDb !== 'superadmin_db') ? tenantDb : 'candidates_db';
+      
+      const assessments = await db.query(`
+        SELECT assessment_round, is_completed, end_time
+        FROM ${dbName}.candidate_assessments
+        WHERE candidate_id = ? AND position_id = ?
+      `, [candidateId, positionId]);
+
+      assessments.forEach(ass => {
+        const round = ass.assessment_round;
+        if (round >= 1 && round <= 4) {
+          results[`round${round}Assigned`] = true;
+          if (ass.is_completed) {
+            results[`round${round}Completed`] = true;
+            results[`round${round}EndTime`] = ass.end_time;
+          }
+        }
+      });
+
+      return results;
+    } catch (error) {
+      console.error('[CandidateService] getAssessmentSummary error:', error.message);
+      // Return empty results instead of failing to avoid breaking UI
+      return {
+        round1Assigned: false, round1Completed: false, round1EndTime: null,
+        round2Assigned: false, round2Completed: false, round2EndTime: null,
+        round3Assigned: false, round3Completed: false, round3EndTime: null,
+        round4Assigned: false, round4Completed: false, round4EndTime: null
+      };
     }
   }
 }

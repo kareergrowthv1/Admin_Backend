@@ -54,6 +54,13 @@ async function upsertJdExtract(tenantDb, positionId, orgId, extractedData) {
       `UPDATE \`${tenantDb}\`.jd_extract SET org_id = ?, extracted_data = ?, updated_at = NOW() WHERE position_id = ?`,
       [orgId, dataJson, positionId]
     );
+    // Also sync to positions table if text exists
+    if (extractedData.text) {
+      await db.query(
+        `UPDATE \`${tenantDb}\`.positions SET job_description = ?, updated_at = NOW() WHERE HEX(id) = ?`,
+        [extractedData.text, positionId.replace(/-/g, '')]
+      );
+    }
     return { id: existing[0].id, updated: true };
   }
   const id = uuidv4();
@@ -61,6 +68,13 @@ async function upsertJdExtract(tenantDb, positionId, orgId, extractedData) {
     `INSERT INTO \`${tenantDb}\`.jd_extract (id, position_id, org_id, extracted_data) VALUES (?, ?, ?, ?)`,
     [id, positionId, orgId, dataJson]
   );
+  // Also sync to positions table if text exists
+  if (extractedData.text) {
+    await db.query(
+      `UPDATE \`${tenantDb}\`.positions SET job_description = ?, updated_at = NOW() WHERE HEX(id) = ?`,
+      [extractedData.text, positionId.replace(/-/g, '')]
+    );
+  }
   return { id, updated: false };
 }
 
@@ -123,11 +137,22 @@ async function extractAndSaveResumeFromText(tenantDb, candidateId, positionId, o
   return { ...result, keywordsCount: keywords.length };
 }
 
+/**
+ * Extract from JD text and save to jd_extract. No file.
+ */
+async function extractAndSaveJdFromText(tenantDb, positionId, orgId, jdText) {
+  const keywords = docExtractor.extractKeywords(jdText || '');
+  await ensureExtractTables(tenantDb);
+  const result = await upsertJdExtract(tenantDb, positionId, orgId, { text: (jdText || '').slice(0, 50000), keywords });
+  return { ...result, keywordsCount: keywords.length };
+}
+
 module.exports = {
   ensureExtractTables,
   upsertJdExtract,
   upsertResumeExtract,
   extractAndSaveJd,
   extractAndSaveResume,
-  extractAndSaveResumeFromText
+  extractAndSaveResumeFromText,
+  extractAndSaveJdFromText
 };

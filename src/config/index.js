@@ -4,6 +4,7 @@ const config = {
 	env: process.env.NODE_ENV,
 	port: parseInt(process.env.PORT, 10),
 	logLevel: process.env.LOG_LEVEL,
+	frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
 
 	database: {
 		host: process.env.DB_HOST,

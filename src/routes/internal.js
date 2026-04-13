@@ -10,8 +10,55 @@ const db = require('../config/db');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
 const CandidateModel = require('../models/candidateModel');
+const questionSectionService = require('../services/questionSectionService');
+const adminService = require('../services/adminService');
 
 router.use(serviceAuth(config.service.internalToken));
+
+/**
+ * GET /internal/question-sections/question-set/:questionSetId
+ * Returns question sections for a question set.
+ */
+router.get('/question-sections/question-set/:questionSetId', async (req, res) => {
+  try {
+    const { questionSetId } = req.params;
+    const tenantDb = req.headers['x-tenant-id'];
+    if (!tenantDb) {
+      return res.status(400).json({ success: false, message: 'X-Tenant-Id header is required' });
+    }
+    const result = await questionSectionService.getQuestionSectionsByQuestionSetId(tenantDb, questionSetId);
+    return res.status(200).json({
+      success: true,
+      message: 'Question sections retrieved successfully',
+      data: result
+    });
+  } catch (error) {
+    console.error('internal/question-sections error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * GET /internal/cross-question-settings?clientId=xxx
+ * Returns cross-question count settings for an organization (used by Streaming AI backend during init).
+ * Headers: X-Service-Token, X-Tenant-Id
+ */
+router.get('/cross-question-settings', async (req, res) => {
+  try {
+    const tenantDb = req.headers['x-tenant-id'];
+    const { clientId, organizationId } = req.query;
+    const orgId = organizationId || clientId;
+    if (!tenantDb || !orgId) {
+      return res.status(400).json({ success: false, message: 'X-Tenant-Id header and clientId query param required' });
+    }
+    const settings = await adminService.getCrossQuestionSettings(tenantDb, orgId);
+    return res.status(200).json({ success: true, data: settings });
+  } catch (error) {
+    console.error('internal/cross-question-settings error:', error);
+    // Return defaults so the Streaming AI backend always gets a usable response
+    return res.status(200).json({ success: true, data: { crossQuestionCountGeneral: 2, crossQuestionCountPosition: 2 } });
+  }
+});
 
 /**
  * POST /internal/verify-token
@@ -541,7 +588,7 @@ router.post('/report-data', async (req, res) => {
     // ── Assessment summary ────────────────────────────────────────────────────
     let assessmentSummary = null;
     try {
-      assessmentSummary = await CandidateModel.getAssessmentSummary(candidateId, positionId, 'candidates_db', null, null);
+      assessmentSummary = await CandidateModel.getAssessmentSummary(candidateId, positionId, tenantDb, null, null);
     } catch (_) {}
 
     return res.status(200).json({
@@ -634,7 +681,7 @@ router.post('/mark-report-generated', async (req, res) => {
     // ── Update assessments_summary.is_report_generated ────────────────────────
     try {
       await CandidateModel.updateAssessmentSummary(
-        candidateId, positionId, { isReportGenerated: true }, 'candidates_db', null
+        candidateId, positionId, { isReportGenerated: true }, tenantDb, null
       );
     } catch (_) {}
 

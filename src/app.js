@@ -16,6 +16,8 @@ const authProxyRoutes = require('./routes/authProxy');
 const internalRoutes = require('./routes/internal');
 const privateLinksRoutes = require('./routes/privateLinks');
 const assessmentSummaryRoutes = require('./routes/assessmentSummaries');
+const attendanceRoutes = require('./routes/attendance');
+const tasksRoutes = require('./routes/tasks');
 
 const app = express();
 
@@ -72,6 +74,7 @@ app.get('/api-docs.json', (req, res) => {
     res.send(swaggerDocument);
 });
 
+// Health check
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'Admin Backend is healthy' });
 });
@@ -89,6 +92,8 @@ app.use('/extract', extractRoutes);
 app.use('/auth', authProxyRoutes);
 app.use('/internal', internalRoutes);
 app.use('/private-links', privateLinksRoutes);
+app.use('/attendance', attendanceRoutes);
+app.use('/tasks', tasksRoutes);
 
 app.use(errorMiddleware);
 

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS clients (
     manager_phone VARCHAR(20),
     status ENUM('ACTIVE', 'INACTIVE') NOT NULL DEFAULT 'ACTIVE',
     created_by BINARY(16) NOT NULL,
+    updated_by BINARY(16),
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
@@ -77,9 +78,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     code VARCHAR(255) NOT NULL UNIQUE,
     
     -- Basic job info
-    requirement_name VARCHAR(255) NOT NULL,
     job_title VARCHAR(255) NOT NULL,
-    position_role VARCHAR(255) NOT NULL,
+    job_role ENUM('IT', 'NON_IT') DEFAULT 'IT',
     job_description TEXT,
     
     -- Client relationship
@@ -87,9 +87,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     
     -- Status and category
     status ENUM('ACTIVE', 'INACTIVE', 'HOLD') NOT NULL DEFAULT 'ACTIVE',
-    requirement_category VARCHAR(100),
     priority_level ENUM('LOW', 'MEDIUM', 'HIGH', 'URGENT') DEFAULT 'MEDIUM',
-    job_family VARCHAR(100),
     
     -- Positions and compensation
     no_of_positions INT NOT NULL DEFAULT 1,
@@ -98,11 +96,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     
     -- Experience requirements
     experience_required VARCHAR(100),
-    experience_min INT NOT NULL DEFAULT 0,
-    experience_max INT NOT NULL DEFAULT 0,
     
     -- Location details
-    work_location VARCHAR(255),
     location VARCHAR(255),
     
     -- Job type and details
@@ -114,8 +109,6 @@ CREATE TABLE IF NOT EXISTS jobs (
     spoc_email VARCHAR(255),
     spoc_phone VARCHAR(20),
     
-    -- Reference and tracking
-    customer_reference_id VARCHAR(100),
     
     -- Document storage
     job_description_document_path VARCHAR(255),
@@ -143,7 +136,6 @@ CREATE TABLE IF NOT EXISTS jobs (
     INDEX idx_job_title (job_title),
     INDEX idx_job_client (client_id),
     INDEX idx_job_priority (priority_level),
-    INDEX idx_job_category (requirement_category),
     INDEX idx_job_deadline (application_deadline),
     INDEX idx_job_created_at (created_at),
     

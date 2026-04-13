@@ -1,12 +1,68 @@
 const express = require('express');
 const router = express.Router();
 const CandidateService = require('../services/candidateService');
-const questionSetController = require('../controllers/questionSetController');
+const candidateController = require('../controllers/candidateController');
 const authMiddleware = require('../middlewares/auth.middleware');
 const tenantMiddleware = require('../middlewares/tenant.middleware');
+const rbacMiddleware = require('../middlewares/rbac.middleware');
+const emailTemplateController = require('../controllers/emailTemplateController');
 
-// Question Set routes (Proxying from candidates for frontend convenience)
-router.get('/question-sets', tenantMiddleware, questionSetController.getQuestionSets);
+router.use(authMiddleware);
+router.use(tenantMiddleware);
+
+// Relocated to /admins prefix in admins.js, but also keeping here for consistency with mass-email frontend
+router.get('/email-templates', authMiddleware, tenantMiddleware, emailTemplateController.getAllTemplates);
+router.post('/email-templates', authMiddleware, tenantMiddleware, emailTemplateController.createTemplate);
+router.put('/email-templates/:id', authMiddleware, tenantMiddleware, emailTemplateController.updateTemplate);
+router.delete('/email-templates/:id', authMiddleware, tenantMiddleware, emailTemplateController.deleteTemplate);
+
+
+/**
+ * @swagger
+ * /candidates/academic-metadata:
+ *   get:
+ *     summary: Get academic metadata (Depts, Branches, Subjects)
+ *     tags: [Candidates]
+ */
+router.get('/academic-metadata', authMiddleware, candidateController.getAcademicMetadata);
+
+// Get candidate assessments summary for Stages (R1..R4)
+router.get('/assessment-summaries', candidateController.getAssessmentSummaries);
+
+/**
+ * @swagger
+ * /candidates/{id}/credits:
+ *   get:
+ *     summary: Get candidate credit overview and usage history
+ *     tags: [Candidates]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ */
+router.get('/:id/credits', candidateController.getCandidateCredits);
+
+/**
+ * @swagger
+ * /candidates/bulk-email/recipients:
+ *   get:
+ *     summary: Get candidates filtered for bulk email
+ *     tags: [Candidates]
+ */
+router.get('/bulk-email/recipients', authMiddleware, candidateController.getCandidatesForBulkEmail);
+
+/**
+ * @swagger
+ * /candidates/bulk-email/send:
+ *   post:
+ *     summary: Send mass emails to selected recipients
+ *     tags: [Candidates]
+ */
+router.post('/bulk-email/send', authMiddleware, candidateController.sendBulkEmail);
+router.get('/bulk-email/failures/:mongoId', authMiddleware, candidateController.getBulkEmailFailures);
+
 
 /**
  * @swagger
@@ -64,27 +120,119 @@ router.get('/question-sets', tenantMiddleware, questionSetController.getQuestion
  *       400:
  *         description: Invalid input
  */
-router.post('/', authMiddleware, async (req, res) => {
+router.post('/', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const userId = req.user?.id || req.headers['x-user-id'] || req.headers['X-User-Id'] || req.headers['X-User-ID'];
-    if (!req.body.organization_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'organization_id is required'
-      });
-    }
-    const candidateData = {
-      ...req.body,
-      candidate_created_by: userId || req.body.candidate_created_by
-    };
+    const multer = require('multer');
+    const upload = multer({ storage: multer.memoryStorage() });
 
-    const result = await CandidateService.createCandidate(candidateData);
-    res.status(201).json(result);
+    upload.single('resumeFile')(req, res, async (err) => {
+      if (err) {
+        return res.status(400).json({ success: false, message: 'File upload error: ' + err.message });
+      }
+
+      const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organization_id;
+      if (!organizationId) {
+        return res.status(400).json({
+          success: false,
+          message: 'organization_id is required'
+        });
+      }
+
+      const userId = req.user?.id || req.headers['x-user-id'] || req.headers['X-User-Id'] || req.headers['X-User-ID'];
+      const candidateData = {
+        ...req.body,
+        candidate_created_by: userId || req.body.candidate_created_by
+      };
+
+      const result = await CandidateService.createCandidate(candidateData, req.tenantDb, req.file);
+      res.status(201).json(result);
+    });
   } catch (error) {
     res.status(400).json({
       success: false,
       message: error.message
     });
+  }
+});
+
+/**
+ * @swagger
+ * /candidates/check-global:
+ *   get:
+ *     summary: Check if a candidate exists globally (outside current org)
+ *     tags: [Candidates]
+ */
+router.get('/check-global', authMiddleware, async (req, res) => {
+  try {
+    const { email } = req.query;
+    const organizationId = req.user?.organizationId || req.user?.organization_id;
+    if (!email || !organizationId) {
+      return res.status(400).json({ success: false, message: 'Email and organizationId are required' });
+    }
+    const result = await CandidateService.checkGlobalCandidate(email, organizationId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /candidates/verify-global-mobile:
+ *   post:
+ *     summary: Verify global profile by matching mobile number
+ *     tags: [Candidates]
+ */
+router.post('/verify-global-mobile', authMiddleware, async (req, res) => {
+  try {
+    const { email, mobile_number } = req.body;
+    const organizationId = req.user?.organizationId || req.user?.organization_id;
+    if (!email || !mobile_number || !organizationId) {
+      return res.status(400).json({ success: false, message: 'Email, mobile_number, and organizationId are required' });
+    }
+    const result = await CandidateService.verifyGlobalByMobile(email, mobile_number, organizationId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /candidates/send-global-otp:
+ *   post:
+ *     summary: Send verification OTP to global candidate email
+ *     tags: [Candidates]
+ */
+router.post('/send-global-otp', authMiddleware, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
+    const result = await CandidateService.sendGlobalVerificationOTP(email);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /candidates/verify-global-otp:
+ *   post:
+ *     summary: Verify OTP and retrieve global candidate details
+ *     tags: [Candidates]
+ */
+router.post('/verify-global-otp', authMiddleware, async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    const organizationId = req.user?.organizationId || req.user?.organization_id;
+    if (!email || !code || !organizationId) {
+      return res.status(400).json({ success: false, message: 'Email, code, and organizationId are required' });
+    }
+    const result = await CandidateService.verifyGlobalByOTP(email, code, organizationId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -122,12 +270,12 @@ router.post('/', authMiddleware, async (req, res) => {
  *       200:
  *         description: Counts by status
  */
-router.get('/counts', authMiddleware, tenantMiddleware, async (req, res) => {
+router.get('/counts', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
     const filters = {
-      organizationId: req.query.organization_id,
+      organizationId: req.user?.organizationId || req.query.organization_id,
       searchTerm: req.query.searchTerm,
-      createdBy: req.query.createdBy,
+      createdBy: req.user?.dataFilter?.createdBy || req.query.createdBy,
       dateFrom: req.query.dateFrom,
       dateTo: req.query.dateTo
     };
@@ -174,14 +322,35 @@ router.get('/counts', authMiddleware, tenantMiddleware, async (req, res) => {
  *       200:
  *         description: { data: { All, Pending, Active, Inactive } }
  */
-router.get('/students/counts', authMiddleware, async (req, res) => {
+router.get('/students/counts', authMiddleware, rbacMiddleware('students'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id || req.query.organizationId;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId;
     if (!organizationId) {
       return res.status(400).json({ success: false, message: 'organization_id is required' });
     }
-    const result = await CandidateService.getStudentCounts(organizationId);
+    const createdBy = req.user?.dataFilter?.createdBy;
+    const result = await CandidateService.getStudentCounts(organizationId, createdBy, req.tenantDb);
     res.status(200).json(result);
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /candidates/students/batches:
+ *   get:
+ *     summary: Get unique batches (years) for students
+ *     tags: [Candidates]
+ */
+router.get('/students/batches', authMiddleware, async (req, res) => {
+  try {
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organizationId;
+    if (!organizationId) {
+      return res.status(400).json({ success: false, message: 'organization_id is required' });
+    }
+    const result = await CandidateService.getUniqueBatches(organizationId);
+    res.status(200).json({ success: true, data: result });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -222,30 +391,39 @@ router.get('/students/counts', authMiddleware, async (req, res) => {
  *       200:
  *         description: Paginated list of students
  */
-router.get('/students', authMiddleware, async (req, res) => {
+router.get('/students', authMiddleware, rbacMiddleware('students'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id || req.query.organizationId;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId;
     if (!organizationId) {
       return res.status(400).json({ success: false, message: 'organization_id is required' });
     }
-    const statusParam = req.query.status;
-    const status = (statusParam && statusParam !== 'All') ? statusParam : undefined;
     const sortOrderParam = (req.query.sortOrder || req.query.sort_order || 'DESC').toUpperCase();
-    const sortOrder = sortOrderParam === 'NEWEST_TO_OLDEST' || sortOrderParam === 'OLDEST_TO_NEWEST'
-      ? (sortOrderParam === 'NEWEST_TO_OLDEST' ? 'DESC' : 'ASC')
-      : (sortOrderParam === 'ASC' ? 'ASC' : 'DESC');
+
+    // Support advanced array filters
+    const parseArray = (val) => {
+      if (!val) return [];
+      if (Array.isArray(val)) return val;
+      if (typeof val === 'string' && val.includes(',')) return val.split(',');
+      return [val];
+    };
 
     const filters = {
       organizationId,
       page: parseInt(req.query.page) || 0,
       pageSize: parseInt(req.query.size || req.query.pageSize) || 10,
-      status,
+      status: (req.query.status && req.query.status !== 'All') ? req.query.status : undefined,
+      statuses: parseArray(req.query.statuses),
       searchTerm: req.query.searchTerm,
+      createdBy: req.user?.dataFilter?.createdBy || req.query.createdBy,
       sortBy: req.query.sortBy || 'created_at',
-      sortOrder
+      sortOrder: sortOrderParam,
+      deptIds: parseArray(req.query.deptIds || req.query.dept_ids),
+      branchIds: parseArray(req.query.branchIds || req.query.branch_ids),
+      semesters: parseArray(req.query.semesters),
+      batches: parseArray(req.query.batches)
     };
 
-    const result = await CandidateService.getStudents(filters);
+    const result = await CandidateService.getStudents(filters, req.tenantDb);
     const pagination = result.pagination || {};
     res.status(200).json({
       content: result.data || [],
@@ -317,7 +495,7 @@ router.get('/students', authMiddleware, async (req, res) => {
  *       200:
  *         description: List of candidates with pagination
  */
-router.get('/', authMiddleware, tenantMiddleware, async (req, res) => {
+router.get('/', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
     const sortOrderParam = (req.query.sortOrder || req.query.sort_order || 'DESC').toUpperCase();
     const sortOrder = sortOrderParam === 'NEWEST_TO_OLDEST' || sortOrderParam === 'OLDEST_TO_NEWEST'
@@ -325,7 +503,7 @@ router.get('/', authMiddleware, tenantMiddleware, async (req, res) => {
       : (sortOrderParam === 'ASC' ? 'ASC' : 'DESC');
 
     const filters = {
-      organizationId: req.query.organization_id || req.query.organizationId,
+      organizationId: req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId,
       page: parseInt(req.query.page) || 0,
       pageSize: parseInt(req.query.size || req.query.pageSize) || 10,
       status: req.query.recommendationStatus || req.query.status,
@@ -333,11 +511,12 @@ router.get('/', authMiddleware, tenantMiddleware, async (req, res) => {
         ? (Array.isArray(req.query.recommendationStatuses) ? req.query.recommendationStatuses : [req.query.recommendationStatuses])
         : (req.query.statuses ? (Array.isArray(req.query.statuses) ? req.query.statuses : [req.query.statuses]) : []),
       searchTerm: req.query.searchTerm,
-      createdBy: req.query.createdBy,
+      createdBy: req.user?.dataFilter?.createdBy || req.query.createdBy,
       sortBy: req.query.sortBy || 'created_at',
       sortOrder,
       dateFrom: req.query.dateFrom || req.query.interviewDateFrom,
-      dateTo: req.query.dateTo || req.query.interviewDateTo
+      dateTo: req.query.dateTo || req.query.interviewDateTo,
+      positionId: req.query.positionId || req.query.position_id
     };
 
     if (!filters.organizationId) {
@@ -389,13 +568,20 @@ router.get('/', authMiddleware, tenantMiddleware, async (req, res) => {
  *       200:
  *         description: Linked candidate list
  */
-router.get('/linked', authMiddleware, tenantMiddleware, async (req, res) => {
+router.get('/linked', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
+    if (!organizationId) {
+      return res.status(400).json({
+        success: false,
+        message: 'organization_id is required'
+      });
+    }
     const sortOrderParam = (req.query.sortOrder || 'DESC').toUpperCase();
     const sortOrder = sortOrderParam === 'NEWEST_TO_OLDEST' ? 'DESC' : (sortOrderParam === 'OLDEST_TO_NEWEST' ? 'ASC' : (sortOrderParam === 'ASC' ? 'ASC' : 'DESC'));
 
     const filters = {
-      organizationId: req.query.organization_id,
+      organizationId: organizationId,
       page: parseInt(req.query.page) || 0,
       pageSize: parseInt(req.query.pageSize || req.query.size) || 10,
       status: req.query.status,
@@ -471,10 +657,17 @@ router.get('/linked', authMiddleware, tenantMiddleware, async (req, res) => {
  *       200:
  *         description: Search results
  */
-router.post('/search', authMiddleware, async (req, res) => {
+router.post('/search', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organization_id;
+    if (!organizationId) {
+      return res.status(400).json({
+        success: false,
+        message: 'organization_id is required'
+      });
+    }
     const filters = {
-      organizationId: req.body.organization_id,
+      organizationId: organizationId,
       page: req.body.page || 0,
       pageSize: req.body.pageSize || 10,
       status: req.body.status,
@@ -494,7 +687,7 @@ router.post('/search', authMiddleware, async (req, res) => {
       });
     }
 
-    const result = await CandidateService.getAllCandidates(filters);
+    const result = await CandidateService.getAllCandidates(filters, req.tenantDb);
     res.status(200).json(result);
   } catch (error) {
     res.status(400).json({
@@ -527,9 +720,9 @@ router.post('/search', authMiddleware, async (req, res) => {
  *       200:
  *         description: Candidate details
  */
-router.get('/auto-fetch/:email', authMiddleware, async (req, res) => {
+router.get('/auto-fetch/:email', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({
         success: false,
@@ -537,7 +730,7 @@ router.get('/auto-fetch/:email', authMiddleware, async (req, res) => {
       });
     }
 
-    const result = await CandidateService.getCandidateByEmail(req.params.email, organizationId);
+    const result = await CandidateService.getCandidateByEmail(req.params.email, organizationId, req.tenantDb);
     res.status(200).json(result);
   } catch (error) {
     res.status(400).json({
@@ -570,9 +763,9 @@ router.get('/auto-fetch/:email', authMiddleware, async (req, res) => {
  *       200:
  *         description: WhatsApp availability status
  */
-router.get('/check-whatsapp/:whatsapp', authMiddleware, async (req, res) => {
+router.get('/check-whatsapp/:whatsapp', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({
         success: false,
@@ -582,7 +775,7 @@ router.get('/check-whatsapp/:whatsapp', authMiddleware, async (req, res) => {
     // When adding existing candidate to another position (add exam), pass candidate_id so their own number is treated as available
     const candidateId = req.query.candidate_id || req.query.candidateId || null;
 
-    const result = await CandidateService.checkWhatsAppAvailability(req.params.whatsapp, organizationId, candidateId);
+    const result = await CandidateService.checkWhatsAppAvailability(req.params.whatsapp, organizationId, candidateId, req.tenantDb);
     res.status(200).json(result);
   } catch (error) {
     res.status(400).json({
@@ -619,7 +812,7 @@ router.get('/check-whatsapp/:whatsapp', authMiddleware, async (req, res) => {
  */
 router.get('/:id/positions', authMiddleware, tenantMiddleware, async (req, res) => {
   try {
-    const organizationId = req.query.organization_id || req.query.organizationId;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId;
     if (!organizationId) {
       return res.status(400).json({ success: false, message: 'organization_id is required' });
     }
@@ -633,9 +826,9 @@ router.get('/:id/positions', authMiddleware, tenantMiddleware, async (req, res) 
   }
 });
 
-router.get('/:id', authMiddleware, async (req, res) => {
+router.get('/:id', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({
         success: false,
@@ -643,7 +836,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
       });
     }
 
-    const result = await CandidateService.getCandidateById(req.params.id, organizationId);
+    const result = await CandidateService.getCandidateById(req.params.id, organizationId, req.tenantDb);
     res.status(200).json(result);
   } catch (error) {
     res.status(error.message.includes('not found') ? 404 : 400).json({
@@ -656,14 +849,14 @@ router.get('/:id', authMiddleware, async (req, res) => {
 /**
  * GET /candidates/:id/resume/download — download resume file (from qwikhire-prod-storage/.../Resume or legacy uploads)
  */
-router.get('/:id/resume/download', authMiddleware, async (req, res) => {
+router.get('/:id/resume/download', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({ success: false, message: 'organization_id is required' });
     }
     const fileStorageUtil = require('../utils/fileStorageUtil');
-    const { buffer, filename } = await CandidateService.getCandidateResume(req.params.id, organizationId);
+    const { buffer, filename } = await CandidateService.getCandidateResume(req.params.id, organizationId, req.tenantDb);
     const contentType = fileStorageUtil.getContentType(filename);
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -726,18 +919,27 @@ router.get('/:id/resume/download', authMiddleware, async (req, res) => {
  *       200:
  *         description: Candidate updated successfully
  */
-router.put('/:id', authMiddleware, async (req, res) => {
+router.put('/:id', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
-    if (!organizationId) {
-      return res.status(400).json({
-        success: false,
-        message: 'organization_id is required'
-      });
-    }
+    const multer = require('multer');
+    const upload = multer({ storage: multer.memoryStorage() });
 
-    const result = await CandidateService.updateCandidate(req.params.id, organizationId, req.body);
-    res.status(200).json(result);
+    upload.single('resumeFile')(req, res, async (err) => {
+      if (err) {
+        return res.status(400).json({ success: false, message: 'File upload error: ' + err.message });
+      }
+
+      const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.body.organization_id;
+      if (!organizationId) {
+        return res.status(400).json({
+          success: false,
+          message: 'organization_id is required'
+        });
+      }
+
+      const result = await CandidateService.updateCandidate(req.params.id, organizationId, req.body, req.tenantDb, req.file);
+      res.status(200).json(result);
+    });
   } catch (error) {
     res.status(error.message.includes('not found') ? 404 : 400).json({
       success: false,
@@ -780,9 +982,9 @@ router.put('/:id', authMiddleware, async (req, res) => {
  *       200:
  *         description: Internal notes updated
  */
-router.put('/:id/internal-notes', authMiddleware, async (req, res) => {
+router.put('/:id/internal-notes', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({
         success: false,
@@ -841,9 +1043,9 @@ router.put('/:id/internal-notes', authMiddleware, async (req, res) => {
  *       200:
  *         description: Status updated
  */
-router.put('/:id/status', authMiddleware, async (req, res) => {
+router.put('/:id/status', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({
         success: false,
@@ -857,7 +1059,8 @@ router.put('/:id/status', authMiddleware, async (req, res) => {
       organizationId,
       req.body.status,
       changedBy,
-      req.body.remarks
+      req.body.remarks,
+      req.tenantDb
     );
     res.status(200).json(result);
   } catch (error) {
@@ -891,9 +1094,9 @@ router.put('/:id/status', authMiddleware, async (req, res) => {
  *       200:
  *         description: Candidate deleted
  */
-router.delete('/:id', authMiddleware, async (req, res) => {
+router.delete('/:id', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({
         success: false,
@@ -949,9 +1152,9 @@ router.delete('/:id', authMiddleware, async (req, res) => {
  *       201:
  *         description: Link created successfully
  */
-router.post('/:id/link', authMiddleware, async (req, res) => {
+router.post('/:id/link', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({
         success: false,
@@ -1027,9 +1230,9 @@ router.post('/:id/link', authMiddleware, async (req, res) => {
  *       201:
  *         description: Candidate mapped to position
  */
-router.post('/:id/position-mapping', authMiddleware, tenantMiddleware, async (req, res) => {
+router.post('/:id/position-mapping', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({
         success: false,
@@ -1079,9 +1282,9 @@ router.post('/:id/position-mapping', authMiddleware, tenantMiddleware, async (re
  *       200:
  *         description: List of candidates for position
  */
-router.get('/position/:positionId', authMiddleware, tenantMiddleware, async (req, res) => {
+router.get('/position/:positionId', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
-    const organizationId = req.query.organization_id;
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id;
     if (!organizationId) {
       return res.status(400).json({
         success: false,
@@ -1134,8 +1337,12 @@ router.get('/position/:positionId', authMiddleware, tenantMiddleware, async (req
  *       200:
  *         description: Bulk update completed
  */
-router.put('/bulk/status', authMiddleware, async (req, res) => {
+router.put('/bulk/status', authMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
+    const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organization_id;
+    if (!organizationId) {
+      return res.status(400).json({ success: false, message: 'organization_id is required' });
+    }
     const result = await CandidateService.bulkUpdateCandidateStatus(
       req.body.candidate_ids,
       req.body.organization_id,
@@ -1151,7 +1358,7 @@ router.put('/bulk/status', authMiddleware, async (req, res) => {
 });
 
 // Add candidate with private link (with file upload) — resumes saved under qwikhire-prod-storage/6464-0160-2190-198-79266/Resume
-router.post('/add-with-link', authMiddleware, tenantMiddleware, async (req, res) => {
+router.post('/add-with-link', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
     const multer = require('multer');
     const upload = multer({ storage: multer.memoryStorage() });
@@ -1198,8 +1405,21 @@ router.post('/add-with-link', authMiddleware, tenantMiddleware, async (req, res)
   }
 });
 
+// Check if public link exists
+router.get('/public-link/check/:positionId', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
+  try {
+    const result = await CandidateService.checkPublicLinkExists(req.params.positionId, req.user);
+    res.status(200).json(result);
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
 // Generate public link
-router.post('/public-link', authMiddleware, tenantMiddleware, async (req, res) => {
+router.post('/public-link', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
     const result = await CandidateService.generatePublicLink(req.body, req.user);
     res.status(201).json(result);
@@ -1264,5 +1484,36 @@ router.get('/public-position/:positionId/:organizationId', async (req, res) => {
     });
   }
 });
+
+// Get public job description (no auth required)
+router.get('/public-position/:positionId/:organizationId/job-description', async (req, res) => {
+  try {
+    const { buffer, filename } = await CandidateService.getPublicJobDescription(
+      req.params.positionId,
+      req.params.organizationId
+    );
+    // Get fileStorageUtil and docExtractor from services if needed, but easier to use existing controller logic style
+    // We need to resolve content type
+    const path = require('path');
+    const ext = path.extname(filename).toLowerCase();
+    let contentType = 'application/pdf';
+    if (ext === '.docx') contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buffer);
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+
+
+
+router.post('/:id/resend-invitation', authMiddleware, rbacMiddleware('students'), candidateController.resendInvitation);
+router.delete('/:id/position/:positionId', authMiddleware, rbacMiddleware('candidates'), candidateController.removeCandidateFromPosition);
 
 module.exports = router;
