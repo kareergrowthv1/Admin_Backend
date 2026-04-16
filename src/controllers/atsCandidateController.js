@@ -4,6 +4,7 @@ const fileStorageUtil = require('../utils/fileStorageUtil');
 const axios = require('axios');
 const config = require('../config');
 const db = require('../config/db');
+const buildHttpsAgent = require('../utils/buildHttpsAgent');
 
 exports.addCandidate = async (req, res, next) => {
     try {
@@ -82,8 +83,9 @@ exports.addCandidate = async (req, res, next) => {
                 };
 
                 console.log(`[AtsCandidateController] Calling ${streamingUrl}/resume-ats/calculate-score for candidate ${id}...`);
-                
-                const scoreResponse = await axios.post(`${streamingUrl}/resume-ats/calculate-score`, payload, { timeout: 60000 });
+
+                const httpsAgent = buildHttpsAgent(streamingUrl);
+                const scoreResponse = await axios.post(`${streamingUrl}/resume-ats/calculate-score`, payload, { timeout: 60000, httpsAgent });
                 
                 console.log(`[AtsCandidateController] Response Data: ${JSON.stringify(scoreResponse.data)}`);
 
@@ -388,6 +390,7 @@ exports.scoreResume = async (req, res, next) => {
         // Call Streaming AI score endpoint with complete context
         let scoreResponse;
         try {
+            const httpsAgent = buildHttpsAgent(streamingUrl);
             scoreResponse = await axios.post(
                 `${streamingUrl}/resume-ats/calculate-score`,
                 {
@@ -401,7 +404,7 @@ exports.scoreResume = async (req, res, next) => {
                     skills: extractedData.skills || job.skills || [],
                     extractedData: extractedData // Send the whole object just in case
                 },
-                { timeout: 60000, headers: { 'Content-Type': 'application/json' } }
+                { timeout: 60000, headers: { 'Content-Type': 'application/json' }, httpsAgent }
             );
         } catch (e) {
             const status = e.response?.status || 502;

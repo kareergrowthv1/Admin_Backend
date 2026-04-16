@@ -6,11 +6,277 @@ const authMiddleware = require('../middlewares/auth.middleware');
 const tenantMiddleware = require('../middlewares/tenant.middleware');
 const rbacMiddleware = require('../middlewares/rbac.middleware');
 const emailTemplateController = require('../controllers/emailTemplateController');
+const { Storage } = require('@google-cloud/storage');
+const db = require('../config/db');
+
+// ── GCS signed-URL helper ─────────────────────────────────────────────────────
+const RECORDING_BUCKET = (process.env.GCS_RECORDING_BUCKET || 'ats-prod-storage').trim();
+let _gcsClient = null;
+function getGcsClient() {
+    if (_gcsClient) return _gcsClient;
+    const clientEmail = (process.env.GCP_CLIENT_EMAIL || '').trim();
+    const rawKey = (process.env.GCP_PRIVATE_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const privateKey = rawKey.replace(/\\n/g, '\n');
+    if (clientEmail && privateKey) {
+        _gcsClient = new Storage({
+            credentials: { client_email: clientEmail, private_key: privateKey },
+        });
+    } else {
+        _gcsClient = new Storage(); // uses ADC / GOOGLE_APPLICATION_CREDENTIALS
+    }
+    return _gcsClient;
+}
+
+function gcsUrlToBlobPath(rawUrl) {
+    let decoded = rawUrl;
+    try { decoded = decodeURIComponent(rawUrl); } catch (_) { /* keep raw */ }
+
+    if (decoded.startsWith('gs://')) {
+        const withoutScheme = decoded.slice(5);
+        const slash = withoutScheme.indexOf('/');
+        if (slash > 0) return { bucket: withoutScheme.slice(0, slash), blob: withoutScheme.slice(slash + 1) };
+    }
+    // https://storage.googleapis.com/<bucket>/<blob...>
+    const httpsPrefix = 'https://storage.googleapis.com/';
+    if (decoded.startsWith(httpsPrefix)) {
+        const rest = decoded.slice(httpsPrefix.length);
+        const slash = rest.indexOf('/');
+        if (slash > 0) return { bucket: rest.slice(0, slash), blob: rest.slice(slash + 1) };
+    }
+    return null;
+}
+
+  function normalizeUuidHex(value) {
+    const raw = String(value || '').trim().replace(/-/g, '');
+    return /^[0-9a-fA-F]{32}$/.test(raw) ? raw : '';
+  }
+
+  function screenshotCategoryFromRelativePath(relativePath) {
+    const rel = String(relativePath || '').toLowerCase();
+    if (rel.startsWith('calibration/')) return 'calibration';
+    if (rel.startsWith('noface/')) return 'noFace';
+    if (rel.startsWith('multiple/')) return 'multipleFaces';
+    if (rel.startsWith('alldirection/')) return 'allDirection';
+    return null;
+  }
+
+  function deriveScreenshotsPrefixFromRecordingBlob(blobPath) {
+    const blob = String(blobPath || '');
+    const mergeMarker = '/merge/';
+    const shotMarker = '/screenshots/';
+
+    if (blob.includes(mergeMarker)) {
+      return `${blob.split(mergeMarker)[0]}/screenshots/`;
+    }
+    if (blob.includes(shotMarker)) {
+      return `${blob.split(shotMarker)[0]}/screenshots/`;
+    }
+    return '';
+  }
+
+const resolveOrganizationIdFromToken = (req, res) => {
+  const tokenOrgId = req.user?.organizationId || req.user?.organization_id;
+  const requestedOrgId = req.query?.organizationId || req.query?.organization_id || req.body?.organizationId || req.body?.organization_id;
+
+  if (!tokenOrgId) {
+    res.status(401).json({ success: false, message: 'organization_id missing in access token' });
+    return null;
+  }
+
+  if (requestedOrgId && String(requestedOrgId) !== String(tokenOrgId)) {
+    res.status(403).json({ success: false, message: 'organization_id does not match access token' });
+    return null;
+  }
+
+  return tokenOrgId;
+};
 
 router.use(authMiddleware);
 router.use(tenantMiddleware);
 
-// Relocated to /admins prefix in admins.js, but also keeping here for consistency with mass-email frontend
+// ── GET /candidates/recording/signed-url?gcsUrl=<encoded-url> ────────────────
+// Exchanges a private GCS URL for a short-lived signed URL the browser can play.
+router.get('/recording/signed-url', async (req, res) => {
+    const rawUrl = (req.query.gcsUrl || '').trim();
+    if (!rawUrl) return res.status(400).json({ success: false, message: 'gcsUrl query param is required' });
+
+    const parsed = gcsUrlToBlobPath(rawUrl);
+    if (!parsed) return res.status(400).json({ success: false, message: 'Could not parse gcsUrl into bucket/blob' });
+
+    if (parsed.bucket !== RECORDING_BUCKET) {
+        return res.status(403).json({ success: false, message: `Bucket ${parsed.bucket} is not an allowed recording bucket` });
+    }
+
+    try {
+        const [signedUrl] = await getGcsClient()
+            .bucket(parsed.bucket)
+            .file(parsed.blob)
+            .getSignedUrl({
+                version: 'v4',
+                action: 'read',
+                expires: Date.now() + 60 * 60 * 1000, // 1 hour
+            });
+        return res.json({ success: true, signedUrl });
+    } catch (err) {
+        console.error('[recording/signed-url]', err.message);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ── GET /candidates/recording/discover-camera?screenGcsUrl=<encoded-url> ─────
+// Given the screen recording GCS URL, finds the camera recording in the same
+// merge/ folder (camera_recording_*.mp4) and returns a signed URL for it.
+// Used when camera_recording_link is not stored in the DB (older candidates).
+router.get('/recording/discover-camera', async (req, res) => {
+    const rawUrl = (req.query.screenGcsUrl || '').trim();
+    if (!rawUrl) return res.status(400).json({ success: false, message: 'screenGcsUrl query param is required' });
+
+    const parsed = gcsUrlToBlobPath(rawUrl);
+    if (!parsed) return res.status(400).json({ success: false, message: 'Could not parse screenGcsUrl into bucket/blob' });
+
+    if (parsed.bucket !== RECORDING_BUCKET) {
+        return res.status(403).json({ success: false, message: `Bucket ${parsed.bucket} is not an allowed recording bucket` });
+    }
+
+    // Extract the merge/ folder prefix from the screen blob path
+    // e.g. "ats-proctoring-data/.../merge/recording_20240115.mp4" → "ats-proctoring-data/.../merge/"
+    const lastSlash = parsed.blob.lastIndexOf('/');
+    if (lastSlash < 0) return res.status(400).json({ success: false, message: 'Could not extract folder from screenGcsUrl' });
+    const mergeFolder = parsed.blob.slice(0, lastSlash + 1); // includes trailing slash
+
+    try {
+        const bucket = getGcsClient().bucket(parsed.bucket);
+        const [files] = await bucket.getFiles({ prefix: `${mergeFolder}camera_recording_` });
+
+        if (!files || files.length === 0) {
+            return res.json({ success: true, signedUrl: null, message: 'No camera recording found in GCS' });
+        }
+
+        // Pick the most recently modified file
+        const latest = files.reduce((a, b) => {
+            const aTime = a.metadata?.updated || a.metadata?.timeCreated || '';
+            const bTime = b.metadata?.updated || b.metadata?.timeCreated || '';
+            return bTime > aTime ? b : a;
+        });
+
+        const [signedUrl] = await latest.getSignedUrl({
+            version: 'v4',
+            action: 'read',
+            expires: Date.now() + 60 * 60 * 1000, // 1 hour
+        });
+        return res.json({ success: true, signedUrl, gcsPath: latest.name });
+    } catch (err) {
+        console.error('[recording/discover-camera]', err.message);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+    // ── GET /candidates/report/screenshot-assets?positionId=&candidateId=&clientId= ──
+    // Fetches calibration + proctoring screenshots from GCS for report page and returns
+    // short-lived signed URLs grouped by category.
+    router.get('/report/screenshot-assets', async (req, res) => {
+      const positionId = String(req.query.positionId || '').trim();
+      const candidateId = String(req.query.candidateId || '').trim();
+
+      const posHex = normalizeUuidHex(positionId);
+      const candHex = normalizeUuidHex(candidateId);
+      if (!posHex || !candHex) {
+        return res.status(400).json({ success: false, message: 'positionId and candidateId (UUID) are required' });
+      }
+
+      try {
+        const rows = await db.query(
+          `SELECT screen_recording_link, recording_link
+             FROM \`candidates_db\`.candidate_recordings
+            WHERE position_id = UNHEX(?)
+            AND candidate_id = UNHEX(?)
+            LIMIT 1`,
+          [posHex, candHex]
+        );
+
+        const row = (rows || [])[0] || {};
+        const recordingUrl = String(row.screen_recording_link || row.recording_link || '').trim();
+        if (!recordingUrl) {
+          return res.json({
+            success: true,
+            data: { profilePicture: '', calibration: [], noFace: [], multipleFaces: [], allDirection: [], all: [] },
+          });
+        }
+
+        const parsed = gcsUrlToBlobPath(recordingUrl);
+        if (!parsed || !parsed.bucket || !parsed.blob) {
+          return res.status(400).json({ success: false, message: 'Unable to parse recording link for GCS bucket/blob' });
+        }
+
+        const screenshotsPrefix = deriveScreenshotsPrefixFromRecordingBlob(parsed.blob);
+        if (!screenshotsPrefix) {
+          return res.status(400).json({ success: false, message: 'Unable to derive screenshots folder from recording link' });
+        }
+
+        const [files] = await getGcsClient().bucket(parsed.bucket).getFiles({ prefix: screenshotsPrefix });
+        const sorted = (files || [])
+          .filter((f) => f?.name && !String(f.name).endsWith('/'))
+          .sort((a, b) => {
+            const aTime = String(a?.metadata?.updated || a?.metadata?.timeCreated || '');
+            const bTime = String(b?.metadata?.updated || b?.metadata?.timeCreated || '');
+            return bTime.localeCompare(aTime);
+          });
+
+        const groupedFiles = {
+          calibration: [],
+          noFace: [],
+          multipleFaces: [],
+          allDirection: [],
+        };
+
+        for (const file of sorted) {
+          const rel = String(file.name).startsWith(screenshotsPrefix)
+            ? String(file.name).slice(screenshotsPrefix.length)
+            : String(file.name);
+          const category = screenshotCategoryFromRelativePath(rel);
+          if (!category) continue;
+          if (groupedFiles[category].length < 4) groupedFiles[category].push(file);
+        }
+
+        const signList = async (list) => {
+          const out = [];
+          for (const file of list) {
+            try {
+              const [signedUrl] = await file.getSignedUrl({
+                version: 'v4',
+                action: 'read',
+                expires: Date.now() + 60 * 60 * 1000,
+              });
+              if (signedUrl) out.push(signedUrl);
+            } catch (_) {
+              // skip bad file and continue
+            }
+          }
+          return out;
+        };
+
+        const calibration = await signList(groupedFiles.calibration);
+        const noFace = await signList(groupedFiles.noFace);
+        const multipleFaces = await signList(groupedFiles.multipleFaces);
+        const allDirection = await signList(groupedFiles.allDirection);
+        const profilePicture = calibration[0] || '';
+
+        return res.json({
+          success: true,
+          data: {
+            profilePicture,
+            calibration,
+            noFace,
+            multipleFaces,
+            allDirection,
+            all: [profilePicture, ...noFace, ...multipleFaces, ...allDirection].filter(Boolean),
+          },
+        });
+      } catch (err) {
+        console.error('[report/screenshot-assets]', err.message);
+        return res.status(500).json({ success: false, message: err.message });
+      }
+    });
 router.get('/email-templates', authMiddleware, tenantMiddleware, emailTemplateController.getAllTemplates);
 router.post('/email-templates', authMiddleware, tenantMiddleware, emailTemplateController.createTemplate);
 router.put('/email-templates/:id', authMiddleware, tenantMiddleware, emailTemplateController.updateTemplate);
@@ -272,8 +538,11 @@ router.post('/verify-global-otp', authMiddleware, async (req, res) => {
  */
 router.get('/counts', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
+    const organizationId = resolveOrganizationIdFromToken(req, res);
+    if (!organizationId) return;
+
     const filters = {
-      organizationId: req.user?.organizationId || req.query.organization_id,
+      organizationId,
       searchTerm: req.query.searchTerm,
       createdBy: req.user?.dataFilter?.createdBy || req.query.createdBy,
       dateFrom: req.query.dateFrom,
@@ -324,7 +593,9 @@ router.get('/counts', authMiddleware, tenantMiddleware, rbacMiddleware('candidat
  */
 router.get('/students/counts', authMiddleware, rbacMiddleware('students'), async (req, res) => {
   try {
-    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId;
+    const organizationId = resolveOrganizationIdFromToken(req, res);
+    if (!organizationId) return;
+
     if (!organizationId) {
       return res.status(400).json({ success: false, message: 'organization_id is required' });
     }
@@ -393,7 +664,9 @@ router.get('/students/batches', authMiddleware, async (req, res) => {
  */
 router.get('/students', authMiddleware, rbacMiddleware('students'), async (req, res) => {
   try {
-    const organizationId = req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId;
+    const organizationId = resolveOrganizationIdFromToken(req, res);
+    if (!organizationId) return;
+
     if (!organizationId) {
       return res.status(400).json({ success: false, message: 'organization_id is required' });
     }
@@ -497,13 +770,16 @@ router.get('/students', authMiddleware, rbacMiddleware('students'), async (req, 
  */
 router.get('/', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), async (req, res) => {
   try {
+    const organizationId = resolveOrganizationIdFromToken(req, res);
+    if (!organizationId) return;
+
     const sortOrderParam = (req.query.sortOrder || req.query.sort_order || 'DESC').toUpperCase();
     const sortOrder = sortOrderParam === 'NEWEST_TO_OLDEST' || sortOrderParam === 'OLDEST_TO_NEWEST'
       ? (sortOrderParam === 'NEWEST_TO_OLDEST' ? 'DESC' : 'ASC')
       : (sortOrderParam === 'ASC' ? 'ASC' : 'DESC');
 
     const filters = {
-      organizationId: req.user?.organizationId || req.user?.organization_id || req.query.organization_id || req.query.organizationId,
+      organizationId,
       page: parseInt(req.query.page) || 0,
       pageSize: parseInt(req.query.size || req.query.pageSize) || 10,
       status: req.query.recommendationStatus || req.query.status,

@@ -347,7 +347,6 @@ router.put('/round-timing', tenantMiddleware, async (req, res) => {
                     section_scores_coding = ?,
                     section_scores_aptitude = ?,
                     recommendation_status = ?,
-                    report_generated = TRUE,
                     updated_at = NOW()
                 WHERE position_id = UNHEX(?) AND candidate_id = UNHEX(?)`,
               [totalScore, round1Score, round2Score, round3Score, aptitudeScore, recStatus, posHex, candHex]
@@ -357,25 +356,6 @@ router.put('/round-timing', tenantMiddleware, async (req, res) => {
             console.warn('[assessment-summaries] interview_evaluations update skipped:', ieErr.message);
           }
         }
-
-        // UPDATE assessment_report_generation → is_generated = 1
-        if (candHex.length === 32 && posHex.length === 32) {
-          try {
-            await db.query(
-              `UPDATE \`candidates_db\`.assessment_report_generation
-                SET is_generated = 1, updated_at = NOW(6)
-                WHERE candidate_id = UNHEX(?) AND position_id = UNHEX(?)`,
-              [candHex, posHex]
-            );
-          } catch (argErr) {
-            console.warn('[assessment-summaries] assessment_report_generation update skipped:', argErr.message);
-          }
-        }
-
-        // UPDATE assessments_summary.is_report_generated = true
-        await CandidateModel.updateAssessmentSummary(
-          candidateId, positionId, { isReportGenerated: true }, summaryDb, assessmentSummaryId || null
-        );
 
         // Mark position-candidate status as TEST_COMPLETED in tenant DB
         try {
@@ -400,7 +380,7 @@ router.put('/round-timing', tenantMiddleware, async (req, res) => {
           }
         } catch (_) {}
 
-        console.log('[assessment-summaries] Scoring complete — reports flagged as generated');
+        console.log('[assessment-summaries] Scoring complete — report-generated flag will be set only after Mongo report save');
       } catch (scoreErr) {
         console.error('[assessment-summaries] Scoring error (non-fatal):', scoreErr.message);
       }

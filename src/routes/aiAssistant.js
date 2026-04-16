@@ -12,7 +12,7 @@ router.post('/schedule-interview', async (req, res) => {
     return res.status(200).json(result);
   } catch (error) {
     console.error('schedule-interview error:', error);
-    return res.status(500).json({
+    return res.status(error.status || 500).json({
       success: false,
       message: error.message || 'Failed to schedule interview'
     });

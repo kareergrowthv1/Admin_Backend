@@ -11,6 +11,7 @@ const config = require('../config');
 const axios = require('axios');
 const emailService = require('../services/emailService');
 const whatsappService = require('../services/whatsappService');
+const buildHttpsAgent = require('../utils/buildHttpsAgent');
 const { getDb, COLLECTIONS } = require('../config/mongo');
 
 const assessmentSummaryDb = () => 'candidates_db';
@@ -280,6 +281,7 @@ async function handleScoreResume(req, res) {
 
     let scoreResponse;
     try {
+      const httpsAgent = buildHttpsAgent(streamingUrl);
       scoreResponse = await axios.post(
         `${streamingUrl}/resume-ats/score`,
         {
@@ -288,7 +290,7 @@ async function handleScoreResume(req, res) {
           positionCandidateId,
           tenantId: req.tenantDb
         },
-        { timeout: 60000, headers: { 'Content-Type': 'application/json' } }
+        { timeout: 60000, headers: { 'Content-Type': 'application/json' }, httpsAgent }
       );
     } catch (e) {
       const status = e.response?.status || 502;
@@ -321,70 +323,135 @@ async function handleScoreResume(req, res) {
 
     const organizationId = bodyOrgId || req.user?.organizationId || req.user?.organization_id;
     let recommendationStatus = 'INVITED';
+    let inviteMeta = { emailSent: false, linkReused: false };
     try {
       const aiSettings = organizationId
         ? await adminService.getAiScoringSettings(req.tenantDb, organizationId)
         : null;
       const minInvite = aiSettings?.resume?.rejection?.notSelected ?? 50;
       recommendationStatus = overallScore >= minInvite ? 'INVITED' : 'RESUME_REJECTED';
-      const statusResult = await CandidateModel.updateRecommendationStatus(
-        req.tenantDb,
-        positionCandidateId,
-        recommendationStatus
-      );
-      if (!statusResult.updated) {
-        console.warn('score-resume: updateRecommendationStatus had no effect');
-      }
     } catch (err) {
-      console.warn('score-resume: AI settings or status update failed, keeping INVITED', err.message);
+      console.warn('score-resume: AI settings fetch failed, using default threshold', err.message);
+      recommendationStatus = overallScore >= 50 ? 'INVITED' : 'RESUME_REJECTED';
     }
 
     if (recommendationStatus === 'INVITED') {
+      let linkDetails = null;
       try {
-        const collegeName = req.body.companyName;
-        const positionTitle = req.body.positionName;
-        const candidateNameFromBody = req.body.candidateName;
-        if (!collegeName || !positionTitle || !candidateNameFromBody) {
-          console.warn('score-resume: skip private link — require companyName (college), positionName (title), candidateName from request');
-        } else {
-          const linkDetails = await CandidateModel.getPositionCandidateDetailsForLink(req.tenantDb, positionCandidateId);
-          if (linkDetails?.candidateId && linkDetails?.questionSetId && organizationId) {
-            let candidateEmail = linkDetails.candidateEmail;
-            if (!candidateEmail) {
-              const candidate = await CandidateModel.getCandidateById(candidateId, organizationId);
-              if (candidate) candidateEmail = candidate.email;
+        if (!organizationId) {
+          return res.status(400).json({ success: false, message: 'organizationId is required to send invite.' });
+        }
+
+        linkDetails = await CandidateModel.getPositionCandidateDetailsForLink(req.tenantDb, positionCandidateId);
+        if (!linkDetails || !linkDetails.candidateId || !linkDetails.questionSetId) {
+          return res.status(404).json({ success: false, message: 'Position candidate details not found for invitation.' });
+        }
+
+        // Fallback: fetch title when join did not resolve it.
+        if (!linkDetails.positionName && linkDetails.positionId) {
+          try {
+            const posHex = String(linkDetails.positionId).replace(/-/g, '');
+            const posRows = await db.query(
+              `SELECT title FROM \`${req.tenantDb}\`.positions WHERE id = UNHEX(?) LIMIT 1`,
+              [posHex]
+            );
+            if (posRows && posRows[0]?.title) linkDetails.positionName = posRows[0].title;
+          } catch (_) {}
+        }
+
+        let candidateEmail = req.body.candidateEmail || linkDetails.candidateEmail;
+        let candidateRecord = null;
+
+        if (!candidateEmail) {
+          try {
+            const rows = await db.query(
+              `SELECT email, candidate_name, mobile_number FROM \`${req.tenantDb}\`.college_candidates WHERE candidate_id = ? LIMIT 1`,
+              [linkDetails.candidateId]
+            );
+            if (rows && rows[0]?.email) {
+              candidateRecord = rows[0];
+              candidateEmail = rows[0].email;
             }
-            if (!candidateEmail) {
-              console.warn('score-resume: skip private link — candidate email not found');
-            } else {
-              const existingLink = await CandidateModel.getExistingPrivateLinkByCandidateAndPosition(candidateId, positionId, 'candidates_db');
-              if (existingLink && existingLink.linkId) {
-                // Reuse existing private link; do not create duplicate
-              } else {
-                const linkBase = process.env.CANDIDATE_LINK_BASE_URL || 'http://localhost:4002';
-                const linkData = {
-                  link_type: 'PRIVATE',
-                  candidate_id: candidateId,
-                  candidate_name: candidateNameFromBody,
-                  client_id: organizationId,
-                  company_name: collegeName,
-                  email: candidateEmail,
-                  position_id: positionId,
-                  position_name: positionTitle,
-                  question_set_id: linkDetails.questionSetId,
-                  interview_platform: 'BROWSER',
-                  link: linkBase,
-                  link_active_at: linkDetails.linkActiveAt || new Date(),
-                  link_expires_at: linkDetails.linkExpiresAt,
-                  created_by: req.user?.id || req.user?.userId || ''
-                };
-                await CandidateModel.createCandidateLink(linkData, 'candidates_db');
-              }
-            }
+          } catch (_) {}
+        }
+        if (!candidateEmail) {
+          candidateRecord = candidateRecord || await CandidateModel.getCandidateById(linkDetails.candidateId, organizationId);
+          candidateEmail = candidateRecord?.email || candidateRecord?.candidate_email;
+        }
+        if (!candidateEmail) {
+          return res.status(400).json({ success: false, message: 'Candidate email not found for invitation.' });
+        }
+
+        let resolvedCompanyName = (req.body.companyName || '').trim();
+        if (!resolvedCompanyName) {
+          try {
+            const college = await adminService.getCollegeDetails(req.tenantDb, organizationId);
+            if (college && college.collegeName) resolvedCompanyName = college.collegeName;
+          } catch (_) {}
+          if (!resolvedCompanyName) {
+            try {
+              const company = await adminService.getCompanyDetails(req.tenantDb, organizationId);
+              if (company && company.companyName) resolvedCompanyName = company.companyName;
+            } catch (_) {}
           }
         }
-      } catch (linkErr) {
-        console.warn('score-resume: private link creation failed (candidate still INVITED)', linkErr.message);
+        resolvedCompanyName = resolvedCompanyName || 'Company';
+
+        const candidateDisplayName = req.body.candidateName || linkDetails.candidateName || candidateRecord?.candidate_name || 'Candidate';
+        const positionDisplayName = req.body.positionName || linkDetails.positionName || 'Assessment';
+
+        const assessmentReady = await ensureCandidateAssessmentReady(req, {
+          positionCandidateId,
+          organizationId,
+          candidateId: linkDetails.candidateId,
+          positionId: linkDetails.positionId,
+          positionName: positionDisplayName,
+          companyName: resolvedCompanyName,
+          candidateEmail,
+          candidateName: candidateDisplayName,
+          questionSetId: linkDetails.questionSetId,
+          linkActiveAt: linkDetails.linkActiveAt,
+          linkExpiresAt: linkDetails.linkExpiresAt
+        });
+
+        inviteMeta.linkReused = Boolean(assessmentReady?.linkReused);
+
+        const testPortalUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_TEST_PORTAL_URL || process.env.CANDIDATE_LINK_BASE_URL || '').trim() || 'your test portal';
+        const inviteSubject = `You have been invited to take the assessment – ${positionDisplayName}`;
+        const inviteBody = `<p>Hi ${candidateDisplayName},</p><p>You have been selected to take an assessment for the position: <strong>${positionDisplayName}</strong> at <strong>${resolvedCompanyName}</strong>.</p><p>Your verification code is: <strong>${assessmentReady?.verificationCode}</strong></p><p>Take your test at: <a href="${testPortalUrl}">${testPortalUrl}</a></p><p>Enter your registered email and this verification code to start the assessment.</p><p>The link is valid for 7 days.</p><p>Best regards,<br/>${resolvedCompanyName} Recruitment Team</p>`;
+
+        const emailResult = await emailService.sendEmail(candidateEmail, inviteSubject, inviteBody);
+        if (!emailResult || !emailResult.sent) {
+          return res.status(500).json({
+            success: false,
+            message: `Invitation email not delivered: ${emailResult?.error || 'Unknown email error'}`
+          });
+        }
+        inviteMeta.emailSent = true;
+
+        const statusResult = await CandidateModel.updateRecommendationStatus(
+          req.tenantDb,
+          positionCandidateId,
+          'INVITED'
+        );
+        if (!statusResult.updated) {
+          return res.status(500).json({ success: false, message: 'Failed to update candidate status to INVITED.' });
+        }
+      } catch (inviteErr) {
+        console.error('score-resume: invitation flow failed', inviteErr);
+        return res.status(500).json({
+          success: false,
+          message: inviteErr.message || 'Failed to create invitation after resume score pass.'
+        });
+      }
+    } else {
+      const statusResult = await CandidateModel.updateRecommendationStatus(
+        req.tenantDb,
+        positionCandidateId,
+        'RESUME_REJECTED'
+      );
+      if (!statusResult.updated) {
+        console.warn('score-resume: updateRecommendationStatus had no effect for RESUME_REJECTED');
       }
     }
 
@@ -419,6 +486,8 @@ async function handleScoreResume(req, res) {
       data: {
         resumeMatchScore: overallScore,
         recommendationStatus,
+        inviteEmailSent: inviteMeta.emailSent,
+        privateLinkReused: inviteMeta.linkReused,
         categoryScores: scoreResponse.data?.categoryScores || {}
       }
     });

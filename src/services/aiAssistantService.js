@@ -4,6 +4,22 @@
  */
 const axios = require('axios');
 const config = require('../config');
+const buildHttpsAgent = require('../utils/buildHttpsAgent');
+
+function normalizeErrorMessage(payload, fallback) {
+    if (typeof payload === 'string' && payload.trim()) return payload;
+    if (Array.isArray(payload)) {
+        const messages = payload
+            .map((item) => item?.msg || item?.message || (typeof item === 'string' ? item : ''))
+            .filter(Boolean);
+        if (messages.length > 0) return messages.join('; ');
+        return JSON.stringify(payload);
+    }
+    if (payload && typeof payload === 'object') {
+        return payload.message || payload.detail || JSON.stringify(payload);
+    }
+    return fallback;
+}
 
 class AiAssistantService {
     /**
@@ -18,15 +34,22 @@ class AiAssistantService {
         }
         const url = `${streamingUrl}/schedule-interview`;
         try {
+            const httpsAgent = buildHttpsAgent(streamingUrl);
             const response = await axios.post(url, data, {
                 timeout: 30000,
-                headers: { 'Content-Type': 'application/json' }
+                headers: { 'Content-Type': 'application/json' },
+                httpsAgent
             });
             return response.data;
         } catch (error) {
-            const msg = error.response?.data?.detail || error.response?.data?.message || error.message;
+            const msg = normalizeErrorMessage(
+                error.response?.data?.detail || error.response?.data?.message,
+                error.message || 'Streaming schedule-interview failed'
+            );
             console.error('AiAssistantService.scheduleInterview: Streaming call failed:', msg);
-            throw new Error(msg || 'Streaming schedule-interview failed');
+            const wrapped = new Error(msg || 'Streaming schedule-interview failed');
+            wrapped.status = error.response?.status || 500;
+            throw wrapped;
         }
     }
 }

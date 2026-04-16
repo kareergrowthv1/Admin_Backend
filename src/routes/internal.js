@@ -732,10 +732,26 @@ router.post('/mark-report-generated', async (req, res) => {
       }
     }
 
-    // ── Update candidate status to TEST_COMPLETED in tenant DB ────────────────
-    // Keep both schema variants in sync: candidate_positions and position_candidates.
-    if (tenantDb && tenantDb !== 'candidates_db' && candHex.length === 32 && posHex.length === 32) {
+    // ── Update candidate status from generated report recommendation ───────────
+    // interview_evaluations.recommendation_status is the source of truth; propagate to
+    // candidate_positions / position_candidates / job_candidates for list views.
+    if (tenantDb && candHex.length === 32 && posHex.length === 32) {
       try {
+        const rawRecommendation = String(scores?.recommendationStatus || 'TEST_COMPLETED').trim().toUpperCase();
+        const allowedRecommendationStatuses = new Set([
+          'RECOMMENDED',
+          'CAUTIOUSLY_RECOMMENDED',
+          'NOT_RECOMMENDED',
+          'SELECTED',
+          'REJECTED',
+          'TEST_COMPLETED',
+        ]);
+        const finalStatus = allowedRecommendationStatuses.has(rawRecommendation)
+          ? rawRecommendation
+          : 'TEST_COMPLETED';
+
+        console.log('[mark-report-generated] Updating status from recommendation: %s → %s (tenantDb=%s)', rawRecommendation, finalStatus, tenantDb);
+
         const existingTables = await db.query(
           `SELECT TABLE_NAME
              FROM INFORMATION_SCHEMA.TABLES
@@ -748,26 +764,47 @@ router.post('/mark-report-generated', async (req, res) => {
         if (tableNames.includes('candidate_positions')) {
           await db.query(
             `UPDATE \`${tenantDb}\`.candidate_positions
-                SET recommendation_status = 'TEST_COMPLETED',
-                    status = 'TEST_COMPLETED',
+                SET recommendation_status = ?,
+                    status = ?,
                     updated_at = NOW()
-              WHERE position_id = UNHEX(?) AND candidate_id = UNHEX(?)`,
-            [posHex, candHex]
+              WHERE UPPER(REPLACE(position_id, '-', '')) = UPPER(?)
+                AND UPPER(REPLACE(candidate_id, '-', '')) = UPPER(?)`,
+            [finalStatus, finalStatus, posHex, candHex]
           );
+          console.log('[mark-report-generated] ✓ candidate_positions updated: status=%s', finalStatus);
         }
 
         if (tableNames.includes('position_candidates')) {
           await db.query(
             `UPDATE \`${tenantDb}\`.position_candidates
-                SET recommendation = 'TEST_COMPLETED',
+                SET recommendation = ?,
                     updated_at = NOW()
               WHERE position_id = UNHEX(?) AND candidate_id = UNHEX(?)`,
-            [posHex, candHex]
+            [finalStatus, posHex, candHex]
           );
+          console.log('[mark-report-generated] ✓ position_candidates updated: recommendation=%s', finalStatus);
+        }
+
+        // Optional ATS table variant used by some tenants.
+        try {
+          await db.query(
+            `UPDATE \`${tenantDb}\`.job_candidates
+                SET recommendation = ?,
+                    updated_at = NOW()
+              WHERE job_id = UNHEX(?) AND candidate_id = UNHEX(?)`,
+            [finalStatus, posHex, candHex]
+          );
+          console.log('[mark-report-generated] ✓ job_candidates updated: recommendation=%s', finalStatus);
+        } catch (_) {}
+
+        if (tableNames.length === 0) {
+          console.warn('[mark-report-generated] No candidate position tables found in %s', tenantDb);
         }
       } catch (statusErr) {
-        console.warn('[mark-report-generated] candidate status update skipped:', statusErr.message);
+        console.warn('[mark-report-generated] candidate status update failed:', statusErr.message);
       }
+    } else {
+      console.warn('[mark-report-generated] Status update skipped: tenantDb=%s, candHex.length=%d, posHex.length=%d', tenantDb, candHex.length, posHex.length);
     }
 
     return res.status(200).json({ success: true, message: 'Report marked as generated' });
@@ -801,6 +838,7 @@ router.patch('/complete-interview', async (req, res) => {
 
     let cpUpdated = 0;
     let pcUpdated = 0;
+    let jcUpdated = 0;
 
     // ── candidate_positions (VARCHAR UUID schema) ────────────────────────────
     try {
@@ -842,6 +880,271 @@ router.patch('/complete-interview', async (req, res) => {
   } catch (err) {
     console.error('[complete-interview] error:', err);
     return res.status(500).json({ success: false, message: err.message || 'Failed to update interview_completed_at' });
+  }
+});
+
+/**
+ * PATCH /internal/recording-link
+ * Body: { positionId, candidateId, tenantId, recordingLink, recordingType }
+ * Persists merged recording URL so AdminFrontend can show recording icon only when video exists.
+ */
+router.patch('/recording-link', async (req, res) => {
+  try {
+    const { positionId, candidateId, tenantId, recordingLink, recordingType } = req.body || {};
+    if (!positionId || !candidateId || !recordingLink) {
+      return res.status(400).json({
+        success: false,
+        message: 'positionId, candidateId and recordingLink are required',
+      });
+    }
+
+    const posHex = String(positionId).replace(/-/g, '');
+    const candHex = String(candidateId).replace(/-/g, '');
+    const link = String(recordingLink).trim();
+    const recType = String(recordingType || 'screen').trim().toLowerCase() === 'camera' ? 'camera' : 'screen';
+    const isScreen = recType === 'screen';
+
+    if (posHex.length !== 32 || candHex.length !== 32) {
+      return res.status(400).json({ success: false, message: 'Invalid positionId or candidateId format' });
+    }
+
+    const providedTenant = String(tenantId || '').trim();
+    let tenantDbs = [];
+    if (providedTenant) {
+      tenantDbs = [providedTenant];
+    } else {
+      const rows = await db.authQuery(
+        `SELECT DISTINCT client AS tenantDb
+           FROM auth_db.users
+          WHERE is_admin = 1
+            AND client IS NOT NULL
+            AND TRIM(client) <> ''`,
+        []
+      );
+      tenantDbs = (rows || []).map((r) => (r.tenantDb || '').toString().trim()).filter(Boolean);
+    }
+
+    let cpUpdated = 0;
+    let pcUpdated = 0;
+    let jcUpdated = 0;
+    let matchedTenantDb = '';
+
+    for (const tenantDb of tenantDbs) {
+      let tenantMatched = false;
+
+      // candidate_positions schema (VARCHAR UUID)
+      try {
+        const cpRes = await db.query(
+          `UPDATE \`${tenantDb}\`.candidate_positions
+              SET recording_link = CASE WHEN ? = 1 THEN ? ELSE COALESCE(recording_link, ?) END,
+                  updated_at = NOW()
+            WHERE UPPER(REPLACE(position_id, '-', '')) = UPPER(?)
+              AND UPPER(REPLACE(candidate_id, '-', '')) = UPPER(?)`,
+          [isScreen ? 1 : 0, link, link, posHex, candHex]
+        );
+        const affected = Number(cpRes?.affectedRows || 0);
+        cpUpdated += affected;
+        if (affected > 0) tenantMatched = true;
+      } catch (e) {
+        console.warn('[recording-link] candidate_positions update skipped (%s): %s', tenantDb, e.message);
+      }
+
+      // position_candidates schema (BINARY(16))
+      try {
+        const pcRes = await db.query(
+          `UPDATE \`${tenantDb}\`.position_candidates
+              SET recording_link = CASE WHEN ? = 1 THEN ? ELSE COALESCE(recording_link, ?) END,
+                  updated_at = NOW()
+            WHERE position_id = UNHEX(?) AND candidate_id = UNHEX(?)`,
+          [isScreen ? 1 : 0, link, link, posHex, candHex]
+        );
+        const affected = Number(pcRes?.affectedRows || 0);
+        pcUpdated += affected;
+        if (affected > 0) tenantMatched = true;
+      } catch (e) {
+        console.warn('[recording-link] position_candidates update skipped (%s): %s', tenantDb, e.message);
+      }
+
+      // job_candidates schema (BINARY(16))
+      try {
+        const jcRes = await db.query(
+          `UPDATE \`${tenantDb}\`.job_candidates
+              SET recording_link = CASE WHEN ? = 1 THEN ? ELSE COALESCE(recording_link, ?) END,
+                  updated_at = NOW()
+            WHERE job_id = UNHEX(?) AND candidate_id = UNHEX(?)`,
+          [isScreen ? 1 : 0, link, link, posHex, candHex]
+        );
+        const affected = Number(jcRes?.affectedRows || 0);
+        jcUpdated += affected;
+        if (affected > 0) tenantMatched = true;
+      } catch (e) {
+        console.warn('[recording-link] job_candidates update skipped (%s): %s', tenantDb, e.message);
+      }
+
+      if (tenantMatched && !matchedTenantDb) {
+        matchedTenantDb = tenantDb;
+      }
+    }
+
+    // Central fallback store used by /candidates enrichment when tenant link tables differ.
+    try {
+      await db.query(
+        `CREATE TABLE IF NOT EXISTS \`candidates_db\`.candidate_recordings (
+           candidate_id BINARY(16) NOT NULL,
+           position_id BINARY(16) NOT NULL,
+           recording_link TEXT NOT NULL,
+           screen_recording_link TEXT NULL,
+           camera_recording_link TEXT NULL,
+           is_video_merged TINYINT(1) NOT NULL DEFAULT 0,
+           is_screen_video_merged TINYINT(1) NOT NULL DEFAULT 0,
+           is_camera_video_merged TINYINT(1) NOT NULL DEFAULT 0,
+           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+           PRIMARY KEY (candidate_id, position_id)
+         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+        []
+      );
+      let hasVideoMergedColumn = false;
+      let hasScreenLinkColumn = false;
+      let hasCameraLinkColumn = false;
+      let hasScreenMergedColumn = false;
+      let hasCameraMergedColumn = false;
+      try {
+        const colRows = await db.query(
+          `SELECT COLUMN_NAME
+             FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'candidates_db'
+              AND TABLE_NAME = 'candidate_recordings'
+              AND COLUMN_NAME IN ('is_video_merged', 'screen_recording_link', 'camera_recording_link', 'is_screen_video_merged', 'is_camera_video_merged')`,
+          []
+        );
+        const names = new Set((colRows || []).map((r) => String(r.COLUMN_NAME || '').toLowerCase()));
+        hasVideoMergedColumn = names.has('is_video_merged');
+        hasScreenLinkColumn = names.has('screen_recording_link');
+        hasCameraLinkColumn = names.has('camera_recording_link');
+        hasScreenMergedColumn = names.has('is_screen_video_merged');
+        hasCameraMergedColumn = names.has('is_camera_video_merged');
+        if (!hasVideoMergedColumn) {
+          await db.query(
+            `ALTER TABLE \`candidates_db\`.candidate_recordings
+               ADD COLUMN is_video_merged TINYINT(1) NOT NULL DEFAULT 0`,
+            []
+          );
+          hasVideoMergedColumn = true;
+        }
+        if (!hasScreenLinkColumn) {
+          await db.query(
+            `ALTER TABLE \`candidates_db\`.candidate_recordings
+               ADD COLUMN screen_recording_link TEXT NULL`,
+            []
+          );
+          hasScreenLinkColumn = true;
+        }
+        if (!hasCameraLinkColumn) {
+          await db.query(
+            `ALTER TABLE \`candidates_db\`.candidate_recordings
+               ADD COLUMN camera_recording_link TEXT NULL`,
+            []
+          );
+          hasCameraLinkColumn = true;
+        }
+        if (!hasScreenMergedColumn) {
+          await db.query(
+            `ALTER TABLE \`candidates_db\`.candidate_recordings
+               ADD COLUMN is_screen_video_merged TINYINT(1) NOT NULL DEFAULT 0`,
+            []
+          );
+          hasScreenMergedColumn = true;
+        }
+        if (!hasCameraMergedColumn) {
+          await db.query(
+            `ALTER TABLE \`candidates_db\`.candidate_recordings
+               ADD COLUMN is_camera_video_merged TINYINT(1) NOT NULL DEFAULT 0`,
+            []
+          );
+          hasCameraMergedColumn = true;
+        }
+      } catch (_) {
+        hasVideoMergedColumn = false;
+      }
+
+      if (hasVideoMergedColumn) {
+        if (isScreen && hasScreenLinkColumn && hasCameraLinkColumn && hasScreenMergedColumn && hasCameraMergedColumn) {
+          await db.query(
+            `INSERT INTO \`candidates_db\`.candidate_recordings (
+               candidate_id,
+               position_id,
+               recording_link,
+               screen_recording_link,
+               camera_recording_link,
+               is_video_merged,
+               is_screen_video_merged,
+               is_camera_video_merged
+             )
+             VALUES (UNHEX(?), UNHEX(?), ?, ?, NULL, 1, 1, 0)
+             ON DUPLICATE KEY UPDATE
+               recording_link = VALUES(recording_link),
+               screen_recording_link = VALUES(screen_recording_link),
+               is_video_merged = 1,
+               is_screen_video_merged = 1,
+               updated_at = CURRENT_TIMESTAMP`,
+            [candHex, posHex, link, link]
+          );
+        } else if (!isScreen && hasScreenLinkColumn && hasCameraLinkColumn && hasScreenMergedColumn && hasCameraMergedColumn) {
+          await db.query(
+            `INSERT INTO \`candidates_db\`.candidate_recordings (
+               candidate_id,
+               position_id,
+               recording_link,
+               screen_recording_link,
+               camera_recording_link,
+               is_video_merged,
+               is_screen_video_merged,
+               is_camera_video_merged
+             )
+             VALUES (UNHEX(?), UNHEX(?), ?, NULL, ?, 0, 0, 1)
+             ON DUPLICATE KEY UPDATE
+               camera_recording_link = VALUES(camera_recording_link),
+               is_camera_video_merged = 1,
+               updated_at = CURRENT_TIMESTAMP`,
+            [candHex, posHex, link, link]
+          );
+        } else {
+          await db.query(
+            `INSERT INTO \`candidates_db\`.candidate_recordings (candidate_id, position_id, recording_link, is_video_merged)
+             VALUES (UNHEX(?), UNHEX(?), ?, 1)
+             ON DUPLICATE KEY UPDATE
+               recording_link = CASE WHEN ? = 1 THEN VALUES(recording_link) ELSE recording_link END,
+               is_video_merged = CASE WHEN ? = 1 THEN 1 ELSE is_video_merged END,
+               updated_at = CURRENT_TIMESTAMP`,
+            [candHex, posHex, link, isScreen ? 1 : 0, isScreen ? 1 : 0]
+          );
+        }
+      } else {
+        await db.query(
+          `INSERT INTO \`candidates_db\`.candidate_recordings (candidate_id, position_id, recording_link)
+           VALUES (UNHEX(?), UNHEX(?), ?)
+           ON DUPLICATE KEY UPDATE
+             recording_link = CASE WHEN ? = 1 THEN VALUES(recording_link) ELSE recording_link END,
+             updated_at = CURRENT_TIMESTAMP`,
+          [candHex, posHex, link, isScreen ? 1 : 0]
+        );
+      }
+    } catch (fallbackErr) {
+      console.warn('[recording-link] candidate_recordings fallback upsert skipped:', fallbackErr.message);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'recording_link updated',
+      recordingType: recType,
+      candidatePositionsUpdated: cpUpdated,
+      positionCandidatesUpdated: pcUpdated,
+      jobCandidatesUpdated: jcUpdated,
+      matchedTenantDb,
+    });
+  } catch (err) {
+    console.error('[recording-link] error:', err);
+    return res.status(500).json({ success: false, message: err.message || 'Failed to update recording link' });
   }
 });
 

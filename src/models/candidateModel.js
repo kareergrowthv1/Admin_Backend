@@ -34,6 +34,45 @@ const getNextCandidateCode = async (database) => {
 };
 
 class CandidateModel {
+  // Resolve which DB to use for candidate profile rows.
+  // Prefer tenant DB only when it has organization data; otherwise fallback to candidates_db.
+  static async resolveProfileDb(preferredDb = 'candidates_db', organizationId = null) {
+    const fallbackDb = 'candidates_db';
+    const targetDb = preferredDb || fallbackDb;
+
+    const hasCollegeCandidatesTable = async (dbName) => {
+      const rows = await db.query(
+        `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'college_candidates'`,
+        [dbName]
+      );
+      return Number(rows?.[0]?.c || 0) > 0;
+    };
+
+    if (targetDb === fallbackDb) return fallbackDb;
+
+    try {
+      const hasTenantTable = await hasCollegeCandidatesTable(targetDb);
+      if (hasTenantTable) {
+        // If org is unknown, keep tenant DB choice.
+        if (!organizationId) return targetDb;
+
+        const tenantCount = await db.query(
+          `SELECT COUNT(*) AS c FROM \`${targetDb}\`.college_candidates WHERE organization_id = ?`,
+          [organizationId]
+        );
+        if (Number(tenantCount?.[0]?.c || 0) > 0) {
+          return targetDb;
+        }
+      }
+
+      const hasFallbackTable = await hasCollegeCandidatesTable(fallbackDb);
+      if (hasFallbackTable) return fallbackDb;
+      return targetDb;
+    } catch (_) {
+      return fallbackDb;
+    }
+  }
+
   // Create a new candidate (shared or tenant-specific)
   static async createCandidate(candidateData, contextDb = 'candidates_db') {
     let targetDb = contextDb;
@@ -193,7 +232,9 @@ class CandidateModel {
     const safeSortBy = allowedSortFields.includes(sortBy) ? sortBy : 'created_at';
     const safeSortOrder = (sortOrder || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
-    let query = `SELECT * FROM ${database}.college_candidates WHERE organization_id = ?`;
+    const sourceDb = await CandidateModel.resolveProfileDb(database, organizationId);
+
+    let query = `SELECT * FROM ${sourceDb}.college_candidates WHERE organization_id = ?`;
     const params = [organizationId];
 
     // Status filter
@@ -259,7 +300,7 @@ class CandidateModel {
 
     // Count total records
     // Count total records - build WHERE clause for count
-    let countQuery = `SELECT COUNT(*) as total FROM ${database}.college_candidates WHERE organization_id = ?`;
+    let countQuery = `SELECT COUNT(*) as total FROM ${sourceDb}.college_candidates WHERE organization_id = ?`;
     const countParams = [organizationId];
 
     if (status) {
@@ -325,7 +366,7 @@ class CandidateModel {
     query += ` ORDER BY ${finalOrderBy} LIMIT ? OFFSET ?`;
     params.push(pageSize, page * pageSize);
 
-    const logMsg = `[CandidateModel] getAllCandidates: db=${database}, q=${query.substring(0, 150)}, params=${JSON.stringify(params)}\n`;
+    const logMsg = `[CandidateModel] getAllCandidates: db=${sourceDb}, q=${query.substring(0, 150)}, params=${JSON.stringify(params)}\n`;
     fs.appendFileSync('./debug.log', logMsg);
     const countRows = await db.query(countQuery, countParams);
     const total = countRows[0]?.total || 0;
@@ -356,8 +397,9 @@ class CandidateModel {
   // Get student (college_candidates) counts by status for organization: All, Pending, Active, Inactive
   static async getStudentCounts(organizationId, createdBy = null, database = 'candidates_db') {
     if (!organizationId) throw new Error('organization_id is required');
+    const sourceDb = await CandidateModel.resolveProfileDb(database, organizationId);
     let query = `SELECT LOWER(COALESCE(NULLIF(TRIM(status), ''), 'all')) AS status, COUNT(*) AS count
-                 FROM \`${database}\`.college_candidates WHERE organization_id = ?`;
+           FROM \`${sourceDb}\`.college_candidates WHERE organization_id = ?`;
     const params = [organizationId];
 
     if (createdBy) {
@@ -461,19 +503,49 @@ class CandidateModel {
       results.data = results.data.concat(candResults.data || candResults.content || []);
     }
 
-    // Deduplicate by candidateEmail AND positionId if they came from multiple paths or belong to different roles
+    const hasAnyRecording = (row) => Boolean(
+      (
+        row?.recordingLink ||
+        row?.recording_link ||
+        row?.screenRecordingLink ||
+        row?.screen_recording_link ||
+        row?.cameraRecordingLink ||
+        row?.camera_recording_link ||
+        ''
+      ).toString().trim()
+    );
+
+    // Deduplicate by candidateEmail AND positionId if they came from multiple paths or belong to different roles.
+    // Prefer rows that have merged recording link so AdminFrontend video icon can be shown.
     const uniqueMap = new Map();
     results.data.forEach(item => {
       const email = (item.candidateEmail || '').toLowerCase().trim();
       const posId = (item.positionId || item.jobId || '').toLowerCase().trim();
       const key = `${email}_${posId}`;
 
+      const hasRecording = hasAnyRecording(item);
+
       if (email && !uniqueMap.has(key)) {
         uniqueMap.set(key, item);
+      } else if (email && uniqueMap.has(key)) {
+        const existing = uniqueMap.get(key) || {};
+        const existingHasRecording = hasAnyRecording(existing);
+        // Upgrade only when the incoming row has recording link and existing row does not.
+        if (!existingHasRecording && hasRecording) {
+          uniqueMap.set(key, { ...existing, ...item });
+        }
       } else if (!email) {
         // Fallback to ID if email missing
         const idKey = item.candidateId || item.id;
-        if (idKey && !uniqueMap.has(idKey)) uniqueMap.set(idKey, item);
+        if (idKey && !uniqueMap.has(idKey)) {
+          uniqueMap.set(idKey, item);
+        } else if (idKey && uniqueMap.has(idKey)) {
+          const existing = uniqueMap.get(idKey) || {};
+          const existingHasRecording = hasAnyRecording(existing);
+          if (!existingHasRecording && hasRecording) {
+            uniqueMap.set(idKey, { ...existing, ...item });
+          }
+        }
       }
     });
 
@@ -489,6 +561,177 @@ class CandidateModel {
     // Simple pagination over the combined set
     const startIndex = page * pageSize;
     const paginatedData = finalData.slice(startIndex, startIndex + pageSize);
+
+    // Attach report generation status for each row shown in the current page.
+    const normalizeId = (value) => {
+      if (value == null) return '';
+      if (Buffer.isBuffer(value)) return value.toString('hex').toLowerCase();
+      const str = String(value).trim();
+      if (!str) return '';
+      return str.replace(/-/g, '').toLowerCase();
+    };
+
+    try {
+      const pagePairs = paginatedData
+        .map((item) => ({
+          candidateHex: normalizeId(item.candidateId || item.candidate_id),
+          positionHex: normalizeId(item.positionId || item.position_id || item.jobId || item.job_id),
+        }))
+        .filter((p) => p.candidateHex.length === 32 && p.positionHex.length === 32);
+
+      const uniquePairMap = new Map();
+      for (const p of pagePairs) {
+        uniquePairMap.set(`${p.candidateHex}:${p.positionHex}`, p);
+      }
+      const uniquePairs = Array.from(uniquePairMap.values());
+
+      const generatedSet = new Set();
+      const recordingMap = new Map();
+      if (uniquePairs.length > 0) {
+        const clauses = [];
+        const params = [];
+        for (const p of uniquePairs) {
+          clauses.push(`(
+            (HEX(candidate_id) = ? OR REPLACE(LOWER(CAST(candidate_id AS CHAR)), '-', '') = ?)
+            AND
+            (HEX(position_id) = ? OR REPLACE(LOWER(CAST(position_id AS CHAR)), '-', '') = ?)
+          )`);
+          const candHexUpper = p.candidateHex.toUpperCase();
+          const posHexUpper = p.positionHex.toUpperCase();
+          params.push(candHexUpper, p.candidateHex, posHexUpper, p.positionHex);
+        }
+
+        const rows = await db.query(
+          `SELECT candidate_id, position_id
+             FROM \`candidates_db\`.assessment_report_generation
+            WHERE is_generated = 1
+              AND (${clauses.join(' OR ')})`,
+          params
+        );
+
+        (rows || []).forEach((r) => {
+          const cHex = normalizeId(r.candidate_id || r.candidateId);
+          const pHex = normalizeId(r.position_id || r.positionId);
+          if (cHex.length === 32 && pHex.length === 32) {
+            generatedSet.add(`${cHex}:${pHex}`);
+          }
+        });
+
+        try {
+          let recRows = [];
+          try {
+            recRows = await db.query(
+              `SELECT candidate_id,
+                      position_id,
+                      recording_link,
+                      screen_recording_link,
+                      camera_recording_link,
+                      is_video_merged,
+                      is_screen_video_merged,
+                      is_camera_video_merged
+                 FROM \`candidates_db\`.candidate_recordings
+                WHERE (${clauses.join(' OR ')})`,
+              params
+            );
+          } catch (_) {
+            recRows = await db.query(
+              `SELECT candidate_id,
+                      position_id,
+                      recording_link,
+                      is_video_merged
+                 FROM \`candidates_db\`.candidate_recordings
+                WHERE (${clauses.join(' OR ')})`,
+              params
+            );
+          }
+          (recRows || []).forEach((r) => {
+            const cHex = normalizeId(r.candidate_id || r.candidateId);
+            const pHex = normalizeId(r.position_id || r.positionId);
+            const screenLink = (r.screen_recording_link || r.screenRecordingLink || '').toString().trim();
+            const cameraLink = (r.camera_recording_link || r.cameraRecordingLink || '').toString().trim();
+            const link = (r.recording_link || r.recordingLink || '').toString().trim();
+            const resolvedScreen = screenLink || link;
+            const resolvedCamera = cameraLink;
+            const mergedAny = r.is_video_merged === 1 || r.is_video_merged === true || r.is_video_merged === '1' || r.is_video_merged === 'true';
+            const mergedScreen = r.is_screen_video_merged === 1 || r.is_screen_video_merged === true || r.is_screen_video_merged === '1' || r.is_screen_video_merged === 'true' || Boolean(resolvedScreen && resolvedScreen.includes('/merge/'));
+            const mergedCamera = r.is_camera_video_merged === 1 || r.is_camera_video_merged === true || r.is_camera_video_merged === '1' || r.is_camera_video_merged === 'true' || Boolean(resolvedCamera && resolvedCamera.includes('/merge/'));
+            if (cHex.length === 32 && pHex.length === 32) {
+              recordingMap.set(`${cHex}:${pHex}`, {
+                recordingLink: resolvedScreen || link || '',
+                screenRecordingLink: resolvedScreen || '',
+                cameraRecordingLink: resolvedCamera || '',
+                isVideoMerged: mergedAny || mergedScreen || mergedCamera,
+                isScreenVideoMerged: mergedScreen,
+                isCameraVideoMerged: mergedCamera,
+              });
+            }
+          });
+        } catch (recErr) {
+          console.warn('[CandidateModel] Unable to enrich recording links:', recErr.message || recErr);
+        }
+      }
+
+      paginatedData.forEach((item) => {
+        const cHex = normalizeId(item.candidateId || item.candidate_id);
+        const pHex = normalizeId(item.positionId || item.position_id || item.jobId || item.job_id);
+        const pairKey = `${cHex}:${pHex}`;
+        item.isReportGenerated = cHex.length === 32 && pHex.length === 32
+          ? generatedSet.has(pairKey)
+          : false;
+
+        const existingScreen = (item.screenRecordingLink || item.screen_recording_link || item.recordingLink || item.recording_link || '').toString().trim();
+        const existingCamera = (item.cameraRecordingLink || item.camera_recording_link || '').toString().trim();
+        const fallbackRec = recordingMap.get(pairKey) || null;
+
+        const resolvedScreen = existingScreen || (fallbackRec?.screenRecordingLink || '');
+        const resolvedCamera = existingCamera || (fallbackRec?.cameraRecordingLink || '');
+        const mergedFlag = Boolean(
+          fallbackRec?.isVideoMerged ||
+          (resolvedScreen && resolvedScreen.includes('/merge/')) ||
+          (resolvedCamera && resolvedCamera.includes('/merge/'))
+        );
+        const mergedScreenFlag = Boolean(
+          fallbackRec?.isScreenVideoMerged ||
+          (resolvedScreen && resolvedScreen.includes('/merge/'))
+        );
+        const mergedCameraFlag = Boolean(
+          fallbackRec?.isCameraVideoMerged ||
+          (resolvedCamera && resolvedCamera.includes('/merge/'))
+        );
+
+        item.recordingLink = resolvedScreen || (fallbackRec?.recordingLink || item.recordingLink || item.recording_link || null);
+        item.screenRecordingLink = resolvedScreen || null;
+        item.screen_recording_link = resolvedScreen || null;
+        item.cameraRecordingLink = resolvedCamera || null;
+        item.camera_recording_link = resolvedCamera || null;
+
+        item.isVideoMerged = mergedFlag;
+        item.is_video_merged = mergedFlag;
+        item.isVideoGenerated = mergedFlag;
+        item.is_video_generated = mergedFlag;
+        item.isScreenVideoMerged = mergedScreenFlag;
+        item.is_screen_video_merged = mergedScreenFlag;
+        item.isCameraVideoMerged = mergedCameraFlag;
+        item.is_camera_video_merged = mergedCameraFlag;
+      });
+    } catch (statusErr) {
+      console.warn('[CandidateModel] Unable to enrich report generation status:', statusErr.message || statusErr);
+      paginatedData.forEach((item) => {
+        if (typeof item.isReportGenerated === 'undefined') item.isReportGenerated = false;
+        if (typeof item.isVideoMerged === 'undefined') item.isVideoMerged = false;
+        if (typeof item.is_video_merged === 'undefined') item.is_video_merged = false;
+        if (typeof item.isVideoGenerated === 'undefined') item.isVideoGenerated = false;
+        if (typeof item.is_video_generated === 'undefined') item.is_video_generated = false;
+        if (typeof item.isScreenVideoMerged === 'undefined') item.isScreenVideoMerged = false;
+        if (typeof item.is_screen_video_merged === 'undefined') item.is_screen_video_merged = false;
+        if (typeof item.isCameraVideoMerged === 'undefined') item.isCameraVideoMerged = false;
+        if (typeof item.is_camera_video_merged === 'undefined') item.is_camera_video_merged = false;
+        if (typeof item.screenRecordingLink === 'undefined') item.screenRecordingLink = item.recordingLink || null;
+        if (typeof item.screen_recording_link === 'undefined') item.screen_recording_link = item.recording_link || item.recordingLink || null;
+        if (typeof item.cameraRecordingLink === 'undefined') item.cameraRecordingLink = null;
+        if (typeof item.camera_recording_link === 'undefined') item.camera_recording_link = null;
+      });
+    }
 
     return {
       success: true,
@@ -589,8 +832,7 @@ class CandidateModel {
     );
     const tenantTables = (tableCheck || []).map(t => t.TABLE_NAME);
     const hasCandidatesTable = tenantTables.includes('candidates');
-    const hasCollegeCandidatesLocal = tenantTables.includes('college_candidates');
-    const profileDb = hasCollegeCandidatesLocal ? tenantDb : 'candidates_db';
+    const profileDb = await CandidateModel.resolveProfileDb(tenantDb, organizationId);
     const sharedDb = 'candidates_db';
 
     const sortFieldMapping = {
@@ -738,8 +980,7 @@ class CandidateModel {
     );
     const tenantTables = (tableCheck || []).map(t => t.TABLE_NAME);
     const hasCandidatesTable = tenantTables.includes('candidates');
-    const hasCollegeCandidatesLocal = tenantTables.includes('college_candidates');
-    const profileDb = hasCollegeCandidatesLocal ? tenantDb : 'candidates_db';
+    const profileDb = await CandidateModel.resolveProfileDb(tenantDb, organizationId);
     const sharedDb = 'candidates_db';
 
     const sortFieldMapping = {
@@ -890,9 +1131,19 @@ class CandidateModel {
       [tenantDb]
     );
     const tenantTables = (tableCheck || []).map(t => t.TABLE_NAME);
-    const hasCollegeCandidatesLocal = tenantTables.includes('college_candidates');
-    const profileDb = hasCollegeCandidatesLocal ? tenantDb : 'candidates_db';
+    const profileDb = await CandidateModel.resolveProfileDb(tenantDb, organizationId);
     const sharedDb = 'candidates_db';
+
+    const cpRecordingColumnCheck = await db.query(
+      `SELECT COLUMN_NAME
+         FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ?
+          AND TABLE_NAME = 'candidate_positions'
+          AND COLUMN_NAME = 'recording_link'`,
+      [tenantDb]
+    );
+    const hasCandidatePositionsRecordingLink = Array.isArray(cpRecordingColumnCheck) && cpRecordingColumnCheck.length > 0;
+    const recordingLinkSelect = hasCandidatePositionsRecordingLink ? 'cp.recording_link' : 'NULL';
 
     const sortFieldMapping = {
       'created_at': 'cp.created_at',
@@ -969,7 +1220,7 @@ class CandidateModel {
         cp.interview_completed_at as interviewCompletedAt,
         cp.resume_score as resumeMatchScore,
         COALESCE(cp.recommendation_status, cp.status) as recommendationStatus,
-        NULL as recordingLink,
+        ${recordingLinkSelect} as recordingLink,
         cp.question_set_id as questionSetId,
         COALESCE(cp.question_set_duration, qs.total_duration) as questionSetDuration,
         cp.interview_notes as interviewNotes,

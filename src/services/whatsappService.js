@@ -1,5 +1,6 @@
 const axios = require('axios');
 const config = require('../config');
+const buildHttpsAgent = require('../utils/buildHttpsAgent');
 
 /**
  * Fetch WhatsApp configuration from Superadmin backend.
@@ -13,9 +14,11 @@ const getWhatsappConfig = async () => {
         return null;
     }
     try {
+        const httpsAgent = buildHttpsAgent(baseUrl);
         const res = await axios.get(`${baseUrl}/superadmin/settings/whatsapp`, {
             timeout: 8000,
-            headers: token ? { 'X-Service-Token': token } : {}
+            headers: token ? { 'X-Service-Token': token } : {},
+            httpsAgent
         });
         if (res.data?.success && res.data?.data) return res.data.data;
         return null;
