@@ -4,7 +4,7 @@
 const axios = require('axios');
 
 
-const BASE_URL = 'http://127.0.0.1:8002';
+const BASE_URL = 'https://admin-backend-rmhx.onrender.com';
 const LOGIN_URL = 'https://superadmin-backend-4uuj.onrender.com/auth-session/login';
 const ADMIN_EMAIL = 'sharan@qwikhire.ai';
 const ADMIN_PASSWORD = 'Sharan@123';
