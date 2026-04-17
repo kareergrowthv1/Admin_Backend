@@ -81,8 +81,8 @@ exports.createPosition = async (req, res, next) => {
             noOfPositions,
             mandatorySkills,
             optionalSkills: optionalSkills || [],
-            jobDescriptionPath,
-            jobDescriptionFileName,
+            job_description_document_path: jobDescriptionPath,
+            job_description_document_file_name: jobDescriptionFileName,
             expectedStartDate,
             applicationDeadline,
             company_name,
@@ -104,19 +104,16 @@ exports.createPosition = async (req, res, next) => {
             }
         }
 
-        // If JD file was uploaded in the same request, store to blob and update position with path
-        if (req.file && result && result.id) {
+        // If JD file was uploaded in the same request, store to GCP and update position with path
+        if (req.files && req.files.jd && req.files.jd[0] && result && result.id) {
             try {
-                const { relativePath } = await fileStorageUtil.storeFile('JD', req.file);
-                await positionService.updatePositionPathOnly(req.tenantDb, result.id, relativePath, req.file.originalname || 'document.pdf');
-                
-                // Also trigger extraction from file if uploaded
+                const { relativePath } = await fileStorageUtil.storeFile('JD', req.files.jd[0]);
+                await positionService.updatePositionJDPath(req.tenantDb, result.id, relativePath, req.files.jd[0].originalname || 'document.pdf');
                 try {
-                    await extractService.extractAndSaveJd(req.tenantDb, result.id, organizationId, req.file.buffer, req.file.originalname || 'document.pdf');
+                    await extractService.extractAndSaveJd(req.tenantDb, result.id, organizationId, req.files.jd[0].buffer, req.files.jd[0].originalname || 'document.pdf');
                 } catch (fileExtractErr) {
                     console.warn('JD file extract on create failed:', fileExtractErr.message);
                 }
-                
                 result = await positionService.getPositionById(req.tenantDb, result.id, userId);
             } catch (storeErr) {
                 console.warn('JD store on create failed:', storeErr.message);
