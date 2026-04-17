@@ -24,6 +24,33 @@ exports.addCandidate = async (req, res, next) => {
                 });
                 resumeUrl = uploadResult.relativePath;
                 resumeFilename = req.file.originalname;
+
+                // AUTOMATIC EXTRACTION: Extract text from the uploaded file immediately
+                try {
+                    const extractService = require('../services/extractService');
+                    // We use a temporary UUID for extraction linked to this job if provided
+                    const tempCandidateId = uuidv4(); 
+                    const extraction = await extractService.extractAndSaveResume(
+                        req.tenantDb, 
+                        tempCandidateId, 
+                        req.body.job_id || req.body.jobId || 'GENERAL', 
+                        organizationId, 
+                        req.file.buffer, 
+                        resumeFilename
+                    );
+                    
+                    if (extraction && extraction.text) {
+                        // Populate extractedJson with the newly extracted text
+                        extractedJson = {
+                            raw_text: extraction.text,
+                            skills: extraction.keywords || [],
+                            extracted_at: new Date().toISOString()
+                        };
+                        console.log(`[AtsCandidateController] Auto-extracted ${extraction.text.length} chars from uploaded resume`);
+                    }
+                } catch (extractErr) {
+                    console.warn('[AtsCandidateController] Auto-extraction failed:', extractErr.message);
+                }
             } catch (uploadErr) {
                 console.warn('[AtsCandidateController] Failed to upload resume during creation:', uploadErr.message);
             }

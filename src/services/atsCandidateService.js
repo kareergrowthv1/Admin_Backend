@@ -138,7 +138,8 @@ class AtsCandidateService {
             expectedCtc: candidateData.expected_ctc === '' ? null : candidateData.expected_ctc,
             noticePeriod: candidateData.notice_period,
             linkedinLink: candidateData.linkedin_link,
-            skills: candidateData.skills
+            skills: candidateData.skills,
+            extractedJson: candidateData.extracted_json || candidateData.extractedJson
         };
 
         const id = await AtsCandidateModel.createCandidate(tenantDb, candidateData.organization_id, normalizedData);
@@ -223,7 +224,7 @@ class AtsCandidateService {
                 notice_period: experienceInfo.notice_period,
                 current_location: extractLocation(text),
                 skills: skillsArray,
-                raw_text: text.substring(0, 1000)
+                raw_text: text.substring(0, 50000)
             };
         } catch (error) {
             throw new Error(`Failed to extract data: ${error.message}`);
