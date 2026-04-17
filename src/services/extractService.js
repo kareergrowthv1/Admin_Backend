@@ -114,7 +114,7 @@ async function extractAndSaveJd(tenantDb, positionId, orgId, fileBuffer, origina
   const { text, keywords } = await docExtractor.extractTextAndKeywords(fileBuffer, originalName || 'document.pdf');
   await ensureExtractTables(tenantDb);
   const result = await upsertJdExtract(tenantDb, positionId, orgId, { text: text.slice(0, 50000), keywords });
-  return { ...result, keywordsCount: keywords.length };
+  return { ...result, text: text.slice(0, 50000), keywords, keywordsCount: keywords.length };
 }
 
 /**
@@ -124,7 +124,7 @@ async function extractAndSaveResume(tenantDb, candidateId, positionId, orgId, fi
   const { text, keywords } = await docExtractor.extractTextAndKeywords(fileBuffer, originalName || 'resume.pdf');
   await ensureExtractTables(tenantDb);
   const result = await upsertResumeExtract(tenantDb, candidateId, positionId, orgId, { text: text.slice(0, 50000), keywords });
-  return { ...result, keywordsCount: keywords.length };
+  return { ...result, text: text.slice(0, 50000), keywords, keywordsCount: keywords.length };
 }
 
 /**

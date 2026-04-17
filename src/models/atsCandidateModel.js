@@ -383,7 +383,8 @@ class AtsCandidateModel {
       name, email, mobileNumber, jobId, stage = 'active_candidates',
       resumeUrl, resumeFilename, resumeScore, source, internalNotes,
       currentLocation, currentOrganization, totalExperience,
-      currentCtc, expectedCtc, noticePeriod, linkedinLink, skills
+      currentCtc, expectedCtc, noticePeriod, linkedinLink, skills,
+      extractedJson
     } = candidateData;
 
     const orgIdClean = organizationId.replace(/-/g, '');
@@ -407,9 +408,9 @@ class AtsCandidateModel {
         `UPDATE \`${globalDatabase}\`.\`ats_candidates\` SET 
           name = ?, current_location = ?, current_organization = ?, 
           total_experience = ?, current_ctc = ?, expected_ctc = ?, 
-          notice_period = ?, linkedin_link = ?, skills = ?
+          notice_period = ?, linkedin_link = ?, skills = ?, extracted_json = ?
          WHERE id = UNHEX(?)`,
-        [name, currentLocation, currentOrganization, totalExperience, currentCtc, expectedCtc, noticePeriod, linkedinLink, JSON.stringify(skills || []), candidateId.replace(/-/g, '')]
+        [name, currentLocation, currentOrganization, totalExperience, currentCtc, expectedCtc, noticePeriod, linkedinLink, JSON.stringify(skills || []), JSON.stringify(extractedJson || null), candidateId.replace(/-/g, '')]
       );
     } else {
       candidateId = uuidv4().replace(/-/g, '');
@@ -424,9 +425,9 @@ class AtsCandidateModel {
         `INSERT INTO \`${globalDatabase}\`.\`ats_candidates\` (
           id, organization_id, name, email, mobile_number, candidate_code,
           current_location, current_organization, total_experience,
-          current_ctc, expected_ctc, notice_period, linkedin_link, skills
-        ) VALUES (UNHEX(?), UNHEX(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [candidateId, orgIdClean, name, email, mobileNumber, code, currentLocation, currentOrganization, totalExperience, currentCtc, expectedCtc, noticePeriod, linkedinLink, JSON.stringify(skills || [])]
+          current_ctc, expected_ctc, notice_period, linkedin_link, skills, extracted_json
+        ) VALUES (UNHEX(?), UNHEX(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [candidateId, orgIdClean, name, email, mobileNumber, code, currentLocation, currentOrganization, totalExperience, currentCtc, expectedCtc, noticePeriod, linkedinLink, JSON.stringify(skills || []), JSON.stringify(extractedJson || null)]
       );
     }
 
