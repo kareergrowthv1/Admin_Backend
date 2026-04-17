@@ -20,26 +20,41 @@ const USE_LOCAL_STORAGE =
 
 const LOCAL_UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
 
-let storage = null;
+let defaultStorage = null;
+let recordingStorage = null;
 let bucket = null;
 let recordingBucket = null;
 
 function getGcsClient(bucketName = null) {
-  if (!storage) {
-    const { Storage } = require('@google-cloud/storage');
-    storage = new Storage();
+  const { Storage } = require('@google-cloud/storage');
+  
+  if (!defaultStorage) {
+    defaultStorage = new Storage();
   }
   if (!bucket) {
-    bucket = storage.bucket(GCS_BUCKET);
+    bucket = defaultStorage.bucket(GCS_BUCKET);
   }
-  if (!recordingBucket) {
-    recordingBucket = storage.bucket(GCS_RECORDING_BUCKET);
-  }
-  
+
   if (bucketName === GCS_RECORDING_BUCKET) {
-    return { storage, bucket: recordingBucket };
+    if (!recordingStorage) {
+      if (process.env.GCP_CLIENT_EMAIL && process.env.GCP_PRIVATE_KEY) {
+        recordingStorage = new Storage({
+          credentials: {
+            client_email: process.env.GCP_CLIENT_EMAIL,
+            private_key: process.env.GCP_PRIVATE_KEY.replace(/\\n/g, '\n')
+          }
+        });
+      } else {
+        recordingStorage = defaultStorage;
+      }
+    }
+    if (!recordingBucket) {
+      recordingBucket = recordingStorage.bucket(GCS_RECORDING_BUCKET);
+    }
+    return { storage: recordingStorage, bucket: recordingBucket };
   }
-  return { storage, bucket };
+
+  return { storage: defaultStorage, bucket };
 }
 
 /** For backward compatibility: logical base path */
