@@ -18,8 +18,10 @@ exports.addCandidate = async (req, res, next) => {
         let resumeFilename = req.body.resume_filename || '';
         if (req.file) {
             try {
-                // req.file can be passed directly to storeFile
-                const uploadResult = await fileStorageUtil.storeFile('Resume', req.file);
+                const uploadResult = await fileStorageUtil.storeFile('Resume', req.file, {
+                    tenantDb: req.tenantDb,
+                    organizationId
+                });
                 resumeUrl = uploadResult.relativePath;
                 resumeFilename = req.file.originalname;
             } catch (uploadErr) {
@@ -230,7 +232,11 @@ exports.uploadAndExtractResume = async (req, res, next) => {
         // 2. Upload file to cloud storage (optional, but requested so we have a URL)
         let resumeUrl = '';
         try {
-            const uploadResult = await fileStorageUtil.storeFile('Resume', req.file);
+            const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organizationId || req.body.organization_id;
+            const uploadResult = await fileStorageUtil.storeFile('Resume', req.file, {
+                tenantDb: req.tenantDb,
+                organizationId
+            });
             resumeUrl = uploadResult.relativePath;
         } catch (uploadErr) {
             console.warn('[AtsCandidateController] Failed to upload resume:', uploadErr.message);

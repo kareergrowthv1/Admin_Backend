@@ -107,7 +107,10 @@ exports.createPosition = async (req, res, next) => {
         // If JD file was uploaded in the same request, store to GCP and update position with path
         if (req.files && req.files.jd && req.files.jd[0] && result && result.id) {
             try {
-                const { relativePath } = await fileStorageUtil.storeFile('JD', req.files.jd[0]);
+                const { relativePath } = await fileStorageUtil.storeFile('JD', req.files.jd[0], {
+                    tenantDb: req.tenantDb,
+                    organizationId
+                });
                 await positionService.updatePositionJDPath(req.tenantDb, result.id, relativePath, req.files.jd[0].originalname || 'document.pdf');
                 try {
                     await extractService.extractAndSaveJd(req.tenantDb, result.id, organizationId, req.files.jd[0].buffer, req.files.jd[0].originalname || 'document.pdf');
@@ -367,7 +370,10 @@ exports.uploadJobDescription = async (req, res, next) => {
                 message: 'Job description file is required'
             });
         }
-        const { relativePath } = await fileStorageUtil.storeFile('JD', file);
+        const { relativePath } = await fileStorageUtil.storeFile('JD', file, {
+            tenantDb: req.tenantDb,
+            organizationId
+        });
         const fileName = file.originalname || 'document.pdf';
 
         let jdExtracted = false;

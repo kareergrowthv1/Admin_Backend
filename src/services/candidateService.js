@@ -106,7 +106,10 @@ class CandidateService {
 
       // Handle resume file if provided
       if (resumeFile) {
-        const { relativePath } = await fileStorageUtil.storeFile('Resume', resumeFile);
+        const { relativePath } = await fileStorageUtil.storeFile('Resume', resumeFile, {
+          tenantDb,
+          organizationId: normalized.organization_id
+        });
         normalized.resume_url = relativePath;
         normalized.resume_filename = resumeFile.originalname;
       }
@@ -472,7 +475,10 @@ class CandidateService {
 
       // Handle resume file if provided
       if (resumeFile) {
-        const { relativePath } = await fileStorageUtil.storeFile('Resume', resumeFile);
+        const { relativePath } = await fileStorageUtil.storeFile('Resume', resumeFile, {
+          tenantDb,
+          organizationId
+        });
         normalizedUpdate.resume_url = relativePath;
         normalizedUpdate.resume_filename = resumeFile.originalname;
       }
@@ -962,7 +968,10 @@ class CandidateService {
       let resumeFilename = null;
       if (file) {
         resumeFilename = file.originalname;
-        const { relativePath } = await fileStorageUtil.storeFile('Resume', file);
+        const { relativePath } = await fileStorageUtil.storeFile('Resume', file, {
+          tenantDb,
+          organizationId
+        });
         resumeUrl = relativePath;
       }
 
@@ -1670,7 +1679,10 @@ class CandidateService {
       let resumeFilename = null;
       if (file) {
         resumeFilename = file.originalname;
-        const { relativePath } = await fileStorageUtil.storeFile('Resume', file);
+        const { relativePath } = await fileStorageUtil.storeFile('Resume', file, {
+          tenantDb: data.tenantDb || data.tenant_db,
+          organizationId: data.organization_id
+        });
         resumeUrl = relativePath;
       }
 
@@ -1761,7 +1773,7 @@ class CandidateService {
                 minimum_experience as minimumExperience, maximum_experience as maximumExperience,
                 no_of_positions as noOfPositions, position_status as status,
                 expected_start_date as expectedStartDate, application_deadline as applicationDeadline,
-                job_description as jobDescription,
+                -- job_description as jobDescription, // REMOVED: column does not exist in positions table
                 job_description_document_path as jobDescriptionDocumentPath,
                 job_description_document_file_name as jobDescriptionDocumentFileName
               FROM \`${dbName}\`.positions WHERE HEX(id) = ? LIMIT 1
