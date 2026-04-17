@@ -130,8 +130,7 @@ const createPosition = async (tenantDb, positionData) => {
         applicationDeadline,
         company_name,
         createdBy,
-        userId,
-        jobDescriptionText
+        userId
     } = positionData;
 
     let resolvedTenantDb = tenantDb;
@@ -226,7 +225,6 @@ const createPosition = async (tenantDb, positionData) => {
                 no_of_positions,
                 job_description_document_path, 
                 job_description_document_file_name,
-                job_description,
                 position_status,
                 expected_start_date,
                 application_deadline,
@@ -234,7 +232,7 @@ const createPosition = async (tenantDb, positionData) => {
                 created_by,
                 created_at,
                 updated_at
-            ) VALUES (UNHEX(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            ) VALUES (UNHEX(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
         `;
 
         const positionIdClean = positionId.replace(/-/g, '');
@@ -253,7 +251,6 @@ const createPosition = async (tenantDb, positionData) => {
                     noOfPositions,
                     jobDescriptionPath || null,
                     jobDescriptionFileName || null,
-                    jobDescriptionText || null,
                     'ACTIVE', // Default status to ACTIVE
                     toNormalizedDate(expectedStartDate),
                     toNormalizedDate(applicationDeadline),
@@ -604,7 +601,6 @@ const getPositionById = async (tenantDb, positionId, userId) => {
                 ${useJobs ? 'NULL' : 'p.company_name'} as companyName,
                 p.job_description_document_path as jobDescriptionDocumentPath,
                 p.job_description_document_file_name as jobDescriptionDocumentFileName,
-                p.job_description as jobDescriptionText,
                 p.internal_notes as internalNotes,
                 p.created_by as createdBy,
                 p.created_at as createdAt,
@@ -789,8 +785,7 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
             applicationDeadline,
             internalNotes,
             jobDescriptionDocumentPath,
-            jobDescriptionDocumentFileName,
-            jobDescriptionText
+            jobDescriptionDocumentFileName
         } = updateData;
 
         // Build dynamic update query
@@ -837,10 +832,7 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
             updateFields.push('job_description_document_file_name = ?');
             params.push(jobDescriptionDocumentFileName);
         }
-        if (jobDescriptionText !== undefined) {
-            updateFields.push('job_description = ?');
-            params.push(jobDescriptionText);
-        }
+        // job_description is not used in DB
 
         const positionIdHex = toPositionIdHex(positionId);
         if (updateFields.length > 0) {
@@ -1062,11 +1054,10 @@ const updatePositionPathOnly = async (tenantDb, positionId, relativePath, fileNa
         UPDATE \`${tenantDb}\`.positions
         SET job_description_document_path = ?,
             job_description_document_file_name = ?,
-            job_description = COALESCE(?, job_description),
             updated_at = NOW()
         WHERE HEX(id) = ?
     `;
-    await db.query(updateQuery, [relativePath, fileName || 'document.pdf', jdText || null, positionIdHex]);
+    await db.query(updateQuery, [relativePath, fileName || 'document.pdf', positionIdHex]);
 };
 
 /**

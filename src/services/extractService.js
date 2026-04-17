@@ -57,7 +57,7 @@ async function upsertJdExtract(tenantDb, positionId, orgId, extractedData) {
     // Also sync to positions table if text exists
     if (extractedData.text) {
       await db.query(
-        `UPDATE \`${tenantDb}\`.positions SET job_description = ?, updated_at = NOW() WHERE HEX(id) = ?`,
+        // `UPDATE \`${tenantDb}\`.positions SET job_description = ?, updated_at = NOW() WHERE HEX(id) = ?`, // REMOVED: job_description column does not exist
         [extractedData.text, positionId.replace(/-/g, '')]
       );
     }
@@ -71,7 +71,7 @@ async function upsertJdExtract(tenantDb, positionId, orgId, extractedData) {
   // Also sync to positions table if text exists
   if (extractedData.text) {
     await db.query(
-      `UPDATE \`${tenantDb}\`.positions SET job_description = ?, updated_at = NOW() WHERE HEX(id) = ?`,
+      // `UPDATE \`${tenantDb}\`.positions SET job_description = ?, updated_at = NOW() WHERE HEX(id) = ?`, // REMOVED: job_description column does not exist
       [extractedData.text, positionId.replace(/-/g, '')]
     );
   }

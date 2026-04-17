@@ -56,7 +56,10 @@ exports.createJob = async (req, res, next) => {
         // Handle JD file upload if present
         if (req.file) {
             try {
-                const { relativePath } = await fileStorageUtil.storeFile('JD', req.file);
+                const { relativePath } = await fileStorageUtil.storeFile('JD', req.file, {
+                    tenantDb: req.tenantDb,
+                    organizationId: jobData.organizationId
+                });
                 jobData.jobDescriptionDocumentPath = relativePath;
                 jobData.jobDescriptionDocumentFileName = req.file.originalname || 'document.pdf';
             } catch (storeErr) {
@@ -181,14 +184,17 @@ exports.uploadJobDescription = async (req, res, next) => {
         if (!file) {
             return res.status(400).json({ success: false, message: 'Job description file is required' });
         }
-        const { relativePath } = await fileStorageUtil.storeFile('JD', file);
+        const organizationId = req.body.organizationId || req.body.organization_id;
+        const { relativePath } = await fileStorageUtil.storeFile('JD', file, {
+            tenantDb: req.tenantDb,
+            organizationId
+        });
         const fileName = file.originalname || 'document.pdf';
 
         // Update job with path (reusing service or direct update)
         await jobService.updateJobPathOnly(req.tenantDb, jobId, relativePath, fileName);
 
         // Also trigger extraction from file if uploaded
-        const organizationId = req.body.organizationId || req.body.organization_id;
         if (organizationId && req.tenantDb && file.buffer) {
             try {
                 await extractService.extractAndSaveJd(req.tenantDb, jobId, organizationId, file.buffer, fileName);

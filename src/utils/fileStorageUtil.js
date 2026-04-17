@@ -10,6 +10,7 @@ const fs = require('fs').promises;
 const fsSync = require('fs');
 
 const GCS_BUCKET = process.env.GCS_BUCKET || 'qwikhire-prod-storage';
+const GCS_RECORDING_BUCKET = process.env.GCS_RECORDING_BUCKET || 'ats-prod-storage';
 const STORAGE_FOLDER_ID = process.env.STORAGE_FOLDER_ID || '6464-0160-2190-198-79266';
 
 // Use local storage when credentials are not set or explicitly requested (avoids startup crash)
@@ -21,12 +22,23 @@ const LOCAL_UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
 
 let storage = null;
 let bucket = null;
+let recordingBucket = null;
 
-function getGcsClient() {
-  if (storage) return { storage, bucket };
-  const { Storage } = require('@google-cloud/storage');
-  storage = new Storage();
-  bucket = storage.bucket(GCS_BUCKET);
+function getGcsClient(bucketName = null) {
+  if (!storage) {
+    const { Storage } = require('@google-cloud/storage');
+    storage = new Storage();
+  }
+  if (!bucket) {
+    bucket = storage.bucket(GCS_BUCKET);
+  }
+  if (!recordingBucket) {
+    recordingBucket = storage.bucket(GCS_RECORDING_BUCKET);
+  }
+  
+  if (bucketName === GCS_RECORDING_BUCKET) {
+    return { storage, bucket: recordingBucket };
+  }
   return { storage, bucket };
 }
 
@@ -90,14 +102,24 @@ function generateSafeFilename(originalFilename) {
  * @param {object} file - Multer file object: { buffer, originalname } or { path (file path), originalname }
  * @returns {Promise<{ storedFilename: string, relativePath: string }>}
  */
-async function storeFile(folderType, file) {
+async function storeFile(folderType, file, options = {}) {
   if (!file || (!file.buffer && !file.path)) {
     throw new Error('File cannot be empty');
   }
 
+  const { tenantDb, organizationId } = options;
   const originalName = file.originalname || 'document.pdf';
   const storedFilename = generateSafeFilename(originalName);
-  const relativePath = `${STORAGE_FOLDER_ID}/${folderType}/${storedFilename}`;
+  
+  let relativePath = `${STORAGE_FOLDER_ID}/${folderType}/${storedFilename}`;
+  let targetBucket = GCS_BUCKET;
+  let forceGcp = false;
+
+  if (folderType.toUpperCase() === 'JD' || folderType.toUpperCase() === 'RESUME') {
+    relativePath = `ats-proctoring-data/qwikhire_easxlo5t/f9583cb8-3e20-4656-bcc1-3c9b8228b7b0/streaming/${folderType.toLowerCase()}/${storedFilename}`;
+    targetBucket = GCS_RECORDING_BUCKET;
+    forceGcp = true;
+  }
 
   let buffer;
   if (file.buffer) {
@@ -106,14 +128,14 @@ async function storeFile(folderType, file) {
     buffer = await fs.readFile(file.path);
   }
 
-  if (USE_LOCAL_STORAGE) {
+  if (USE_LOCAL_STORAGE && !forceGcp) {
     const fullPath = path.join(LOCAL_UPLOADS_DIR, relativePath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
     await fs.writeFile(fullPath, buffer);
     return { storedFilename, relativePath };
   }
 
-  const { bucket: b } = getGcsClient();
+  const { bucket: b } = getGcsClient(targetBucket);
   const gcsFile = b.file(relativePath);
   await gcsFile.save(buffer, {
     contentType: getContentType(storedFilename),
@@ -131,7 +153,7 @@ async function retrieveFileByRelativePath(relativePath) {
   }
   const key = relativePath.replace(/^\/+/, '').replace(/\\/g, '/');
 
-  if (USE_LOCAL_STORAGE) {
+  if (USE_LOCAL_STORAGE && !key.startsWith('ats-proctoring-data/')) {
     const fullPath = path.join(LOCAL_UPLOADS_DIR, key);
     try {
       return await fs.readFile(fullPath);
@@ -141,7 +163,8 @@ async function retrieveFileByRelativePath(relativePath) {
     }
   }
 
-  const { bucket: b } = getGcsClient();
+  const targetBucket = key.startsWith('ats-proctoring-data/') ? GCS_RECORDING_BUCKET : GCS_BUCKET;
+  const { bucket: b } = getGcsClient(targetBucket);
   const gcsFile = b.file(key);
   const [exists] = await gcsFile.exists();
   if (!exists) {
