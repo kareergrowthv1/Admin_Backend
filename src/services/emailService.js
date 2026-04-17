@@ -5,6 +5,7 @@
  */
 const axios = require('axios');
 const config = require('../config');
+const buildHttpsAgent = require('../utils/buildHttpsAgent');
 
 const getEmailConfig = async () => {
     const baseUrl = (config.authServiceUrl || process.env.AUTH_SERVICE_URL || '').replace(/\/$/, '');
@@ -14,9 +15,11 @@ const getEmailConfig = async () => {
         return null;
     }
     try {
+        const httpsAgent = buildHttpsAgent(baseUrl);
         const res = await axios.get(`${baseUrl}/superadmin/settings/email`, {
             timeout: 8000,
-            headers: token ? { 'X-Service-Token': token } : {}
+            headers: token ? { 'X-Service-Token': token } : {},
+            httpsAgent
         });
         if (res.data?.success && res.data?.data) return res.data.data;
         return null;

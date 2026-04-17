@@ -379,6 +379,8 @@ class CandidateService {
       const d = new Date(v);
       return isNaN(d.getTime()) ? v : d.toISOString().slice(0, 19).replace('Z', '');
     };
+    const toBool = (v) => v === true || v === 1 || v === '1' || v === 'true';
+
     return {
       candidateId: toUuid(row.candidateId) ?? row.candidate_id ?? null,
       candidateCode: row.candidateCode ?? row.candidate_code ?? null,
@@ -395,6 +397,21 @@ class CandidateService {
       linkExpiresAt: toIso(row.linkExpiresAt ?? row.link_expires_at),
       interviewCompletedAt: toIso(row.interviewCompletedAt ?? row.interview_completed_at),
       recommendationStatus: row.recommendationStatus ?? row.recommendation_status ?? row.status ?? null,
+      isReportGenerated: toBool(row.isReportGenerated ?? row.is_report_generated),
+      is_report_generated: toBool(row.isReportGenerated ?? row.is_report_generated),
+      recordingLink: row.recordingLink ?? row.recording_link ?? null,
+      screenRecordingLink: row.screenRecordingLink ?? row.screen_recording_link ?? row.recordingLink ?? row.recording_link ?? null,
+      screen_recording_link: row.screenRecordingLink ?? row.screen_recording_link ?? row.recordingLink ?? row.recording_link ?? null,
+      cameraRecordingLink: row.cameraRecordingLink ?? row.camera_recording_link ?? null,
+      camera_recording_link: row.cameraRecordingLink ?? row.camera_recording_link ?? null,
+      isVideoMerged: toBool(row.isVideoMerged ?? row.is_video_merged),
+      is_video_merged: toBool(row.isVideoMerged ?? row.is_video_merged),
+      isVideoGenerated: toBool(row.isVideoGenerated ?? row.is_video_generated ?? row.isVideoMerged ?? row.is_video_merged),
+      is_video_generated: toBool(row.isVideoGenerated ?? row.is_video_generated ?? row.isVideoMerged ?? row.is_video_merged),
+      isScreenVideoMerged: toBool(row.isScreenVideoMerged ?? row.is_screen_video_merged ?? row.isVideoMerged ?? row.is_video_merged),
+      is_screen_video_merged: toBool(row.isScreenVideoMerged ?? row.is_screen_video_merged ?? row.isVideoMerged ?? row.is_video_merged),
+      isCameraVideoMerged: toBool(row.isCameraVideoMerged ?? row.is_camera_video_merged),
+      is_camera_video_merged: toBool(row.isCameraVideoMerged ?? row.is_camera_video_merged),
       questionSetId: toUuid(row.questionSetId ?? row.question_set_id) ?? null,
       questionSetDuration: row.questionSetDuration ?? row.question_set_duration ?? null,
       questionSetCode: row.questionSetCode ?? row.question_set_code ?? null,

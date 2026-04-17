@@ -3,6 +3,7 @@ const config = require('./config');
 const db = require('./config/db');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const sqlUtils = require('./utils/sqlUtils');
 
 const CANDIDATES_DB = 'candidates_db';
@@ -160,6 +161,20 @@ const startServer = async () => {
         // Run once on startup to process any links that expired while server was down
         scheduler.runLinkExpiryNow();
     });
+
+    // Optional HTTPS listener for LAN sharing / secure browser access.
+    const sslKeyPath = process.env.SSL_KEY_PATH;
+    const sslCertPath = process.env.SSL_CERT_PATH;
+    const sslPort = Number(process.env.SSL_PORT || 0);
+    if (sslKeyPath && sslCertPath && sslPort > 0 && fs.existsSync(sslKeyPath) && fs.existsSync(sslCertPath)) {
+        const tlsOptions = {
+            key: fs.readFileSync(sslKeyPath),
+            cert: fs.readFileSync(sslCertPath),
+        };
+        https.createServer(tlsOptions, app).listen(sslPort, '0.0.0.0', () => {
+            console.log(`Admin Backend HTTPS running on port ${sslPort}`);
+        });
+    }
 };
 
 startServer();

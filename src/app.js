@@ -25,15 +25,40 @@ const app = express();
 const DEFAULT_CORS_ORIGINS = [
   'http://localhost:4000', 'http://localhost:4001', 'http://localhost:4002', 'http://localhost:4003',
   'http://localhost:5173', 'http://localhost:5174',
+  'https://localhost:4000', 'https://localhost:4001', 'https://localhost:4002', 'https://localhost:4003',
+  'https://localhost:5173', 'https://localhost:5174',
   'http://127.0.0.1:4000', 'http://127.0.0.1:4001', 'http://127.0.0.1:4002', 'http://127.0.0.1:4003',
   'http://127.0.0.1:5173', 'http://127.0.0.1:5174',
+  'https://127.0.0.1:4000', 'https://127.0.0.1:4001', 'https://127.0.0.1:4002', 'https://127.0.0.1:4003',
+  'https://127.0.0.1:5173', 'https://127.0.0.1:5174',
 ];
 const corsOrigins = (process.env.CORS_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
 const originList = corsOrigins.length > 0 ? corsOrigins : DEFAULT_CORS_ORIGINS;
+
+function isLocalDevOrigin(origin) {
+  try {
+    const u = new URL(origin);
+    const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+    const isFrontendPort = [4000, 4001, 4002, 4003, 5173, 5174].includes(port);
+    if (!isFrontendPort) return false;
+
+    const host = u.hostname;
+    const isLocalHost = host === 'localhost' || host === '127.0.0.1';
+    const isLanHost =
+      /^192\.168\.\d{1,3}\.\d{1,3}$/.test(host) ||
+      /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host);
+
+    return isLocalHost || isLanHost;
+  } catch (_) {
+    return false;
+  }
+}
+
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
-    if (originList.includes(origin)) return cb(null, true);
+    if (originList.includes(origin) || isLocalDevOrigin(origin)) return cb(null, true);
     return cb(null, false);
   },
   credentials: true,
