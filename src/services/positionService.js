@@ -299,26 +299,28 @@ const createPosition = async (tenantDb, positionData) => {
             throw new Error('Failed to generate unique position code');
         }
 
-        // Insert mandatory skills
+        // Insert mandatory skills (Batch)
         if (mandatorySkills && mandatorySkills.length > 0) {
-            for (const skill of mandatorySkills) {
-                const insertSkillQuery = `
-                    INSERT INTO \`${resolvedTenantDb}\`.position_mandatory_skills (position_id, skill)
-                    VALUES (UNHEX(?), ?)
-                `;
-                await db.query(insertSkillQuery, [positionIdClean, skill]);
-            }
+            const values = [];
+            const placeholders = [];
+            mandatorySkills.forEach(skill => {
+                placeholders.push('(UNHEX(?), ?)');
+                values.push(positionIdClean, skill);
+            });
+            const insertSkillQuery = `INSERT INTO \`${resolvedTenantDb}\`.position_mandatory_skills (position_id, skill) VALUES ${placeholders.join(', ')}`;
+            await db.query(insertSkillQuery, values);
         }
 
-        // Insert optional skills
+        // Insert optional skills (Batch)
         if (optionalSkills && optionalSkills.length > 0) {
-            for (const skill of optionalSkills) {
-                const insertSkillQuery = `
-                    INSERT INTO \`${resolvedTenantDb}\`.position_optional_skills (position_id, skill)
-                    VALUES (UNHEX(?), ?)
-                `;
-                await db.query(insertSkillQuery, [positionIdClean, skill]);
-            }
+            const values = [];
+            const placeholders = [];
+            optionalSkills.forEach(skill => {
+                placeholders.push('(UNHEX(?), ?)');
+                values.push(positionIdClean, skill);
+            });
+            const insertSkillQuery = `INSERT INTO \`${resolvedTenantDb}\`.position_optional_skills (position_id, skill) VALUES ${placeholders.join(', ')}`;
+            await db.query(insertSkillQuery, values);
         }
 
         // Update utilized position credits

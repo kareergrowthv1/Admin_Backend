@@ -95,48 +95,26 @@ exports.createPosition = async (req, res, next) => {
 
         let result = await positionService.createPosition(req.tenantDb, positionData);
 
-        // If JD text is provided, extract and save to jd_extract (upsert)
+        // If JD text is provided, extract and save to jd_extract. 
+        // Run asynchronously without awaiting to ensure rapid API response (prevents UI timeouts)
         if (jobDescriptionText && result && result.id) {
-            try {
-                await extractService.extractAndSaveJdFromText(req.tenantDb, result.id, organizationId, jobDescriptionText);
-            } catch (extractErr) {
-                console.warn('JD text extract on create failed:', extractErr.message);
-            }
+            extractService.extractAndSaveJdFromText(req.tenantDb, result.id, organizationId, jobDescriptionText)
+                .catch(err => console.warn('JD text extract async on create failed:', err.message));
         }
 
-        // If JD file was uploaded in the same request, store to GCP and update position with path
-        if (req.files && req.files.jd && req.files.jd[0] && result && result.id) {
-            try {
-                const { relativePath } = await fileStorageUtil.storeFile('JD', req.files.jd[0], {
-                    tenantDb: req.tenantDb,
-                    organizationId
-                });
-                await positionService.updatePositionJDPath(req.tenantDb, result.id, relativePath, req.files.jd[0].originalname || 'document.pdf');
-                try {
-                    await extractService.extractAndSaveJd(req.tenantDb, result.id, organizationId, req.files.jd[0].buffer, req.files.jd[0].originalname || 'document.pdf');
-                } catch (fileExtractErr) {
-                    console.warn('JD file extract on create failed:', fileExtractErr.message);
-                }
-                result = await positionService.getPositionById(req.tenantDb, result.id, userId);
-            } catch (storeErr) {
-                console.warn('JD store on create failed:', storeErr.message);
-            }
-        }
-
-        // Global notification trigger for new job
-        try {
-            const { getDb, COLLECTIONS } = require('../config/mongo');
-            const mongoDb = await getDb();
-            await mongoDb.collection(COLLECTIONS.NOTIFICATIONS).insertOne({
+        // Global notification trigger for new job (background)
+        const { getDb, COLLECTIONS } = require('../config/mongo');
+        getDb().then(mongoDb => {
+            mongoDb.collection(COLLECTIONS.NOTIFICATIONS).insertOne({
                 title: 'New Job Posted!',
                 message: `A new position for "${result.title || 'Job'}" has been added. Check it out now!`,
                 type: 'global',
                 createdAt: new Date(),
                 dismissed: false
-            });
-        } catch (mongoErr) {
-            console.warn('Global notification trigger failed (AdminBackend):', mongoErr.message);
-        }
+            }).catch(e => console.warn('Global notification trigger failed:', e.message));
+        }).catch(err => console.warn('Mongo connection for notification failed:', err.message));
+
+
 
         return res.status(201).json({
             success: true,
