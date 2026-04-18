@@ -288,7 +288,8 @@ async function handleScoreResume(req, res) {
           positionId,
           candidateId,
           positionCandidateId,
-          tenantId: req.tenantDb
+          tenantId: req.tenantDb,
+          resumeText: req.body.resumeText || undefined
         },
         { timeout: 60000, headers: { 'Content-Type': 'application/json' }, httpsAgent }
       );
