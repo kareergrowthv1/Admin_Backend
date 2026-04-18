@@ -72,7 +72,8 @@ class CandidateService {
       }
 
       // 3. Send invitation email
-      const loginUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_LINK_BASE_URL || '').trim();
+      const loginUrl = (config.candidatePlatformUrl || process.env.CANDIDATE_LINK_BASE_URL || '').trim();
+
       const adminName = 'Your College Admin'; // Ideally fetch from request context if available
 
       await emailService.sendCandidateInvitationEmail(
@@ -247,7 +248,8 @@ class CandidateService {
         console.log(`[CandidateService] Provisioned candidate_login account for ${normalized.email}`);
         
         // 2. Send invitation email
-        const loginUrl = (config.candidateTestPortalUrl || process.env.CANDIDATE_LINK_BASE_URL || '').trim();
+        const loginUrl = (config.candidatePlatformUrl || process.env.CANDIDATE_LINK_BASE_URL || '').trim();
+
         const adminName = normalized.createdBy_name || 'Your College Admin';
         
         await emailService.sendCandidateInvitationEmail(
