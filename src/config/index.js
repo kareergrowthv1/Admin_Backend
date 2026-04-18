@@ -43,8 +43,12 @@ const config = {
 	// Auth (SuperadminBackend): for proxying GET /auth/users/:id and GET /superadmin/settings/email
 	authServiceUrl: process.env.AUTH_SERVICE_URL,
 
-	// Candidate test portal base URL for invite emails (CANDIDATE_TEST_PORTAL_URL or CANDIDATE_LINK_BASE_URL)
+	// Candidate main platform URL for welcome emails
+	candidatePlatformUrl: process.env.CANDIDATE_LINK_BASE_URL || '',
+
+	// Candidate test portal base URL for assessment invite emails (CANDIDATE_TEST_PORTAL_URL or fallback)
 	candidateTestPortalUrl: process.env.CANDIDATE_TEST_PORTAL_URL || process.env.CANDIDATE_LINK_BASE_URL || '',
+
 
 	// Admin portal login URL for new-admin welcome email (ADMIN_LOGIN_URL or FRONTEND_URL + /login)
 	adminLoginUrl: process.env.ADMIN_LOGIN_URL || (process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL.replace(/\/$/, '')}/login` : ''),
