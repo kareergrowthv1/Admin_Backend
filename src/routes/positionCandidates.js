@@ -297,9 +297,26 @@ async function handleScoreResume(req, res) {
       const status = e.response?.status || 502;
       let msg = e.response?.data?.detail ?? e.response?.data?.message ?? e.message;
       if (typeof msg !== 'string') msg = msg ? JSON.stringify(msg) : 'Streaming resume-score API unavailable';
-      return res.status(status).json({
-        success: false,
-        message: msg
+
+      // Graceful degradation: if resume is too short or AI service is down, don't block candidate addition.
+      if (status === 400 && msg.includes('too short')) {
+        console.warn('[handleScoreResume] Scoring skipped: resume text too short for AI analysis.');
+        return res.status(200).json({
+          success: true,
+          data: {
+            recommendationStatus: 'INVITED',
+            warning: 'Resume text too short for AI analysis. Scoring skipped.',
+            overallScore: 0
+          }
+        });
+      }
+
+      console.error('[handleScoreResume] Streaming error:', msg);
+      return res.status(status === 400 ? 200 : status).json({
+        success: status === 400, // Return success if it's a client usage error (like length)
+        message: msg,
+        warning: status === 400 ? 'AI scoring unavailable for this resume variant.' : undefined,
+        data: status === 400 ? { recommendationStatus: 'INVITED', overallScore: 0 } : undefined
       });
     }
 

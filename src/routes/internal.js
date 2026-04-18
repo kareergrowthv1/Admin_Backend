@@ -84,10 +84,19 @@ function textFromExtractedData(extractedData) {
   const data = typeof extractedData === 'string'
     ? (() => { try { return JSON.parse(extractedData); } catch { return {}; } })()
     : extractedData;
+  
   if (data.text && String(data.text).trim().length >= 20) return String(data.text).trim();
+  
+  // Try mapping common fields if 'text' is missing but other structured data is present
+  if (data.fullText && String(data.fullText).trim().length >= 20) return String(data.fullText).trim();
+  if (data.raw_text && String(data.raw_text).trim().length >= 20) return String(data.raw_text).trim();
+
   const kw = data.keywords;
   if (Array.isArray(kw) && kw.length) return kw.map(k => (k && typeof k === 'string' ? k : String(k))).join(', ');
-  if (typeof data.text === 'string') return data.text.trim();
+  
+  // Fallback to whatever string is there if it's over 10 chars
+  if (typeof data.text === 'string' && data.text.trim().length > 10) return data.text.trim();
+  
   return '';
 }
 
@@ -151,15 +160,28 @@ router.post('/score-resume-input', async (req, res) => {
     } catch (_) { /* table may not exist */ }
 
     if (!resumeText || resumeText.length < 50) {
-      const candidateServiceUrl = (config.candidateServiceUrl || '').replace(/\/$/, '');
-      if (candidateServiceUrl) {
-        try {
-          const resumeRes = await axios.get(
-            `${candidateServiceUrl}/candidates/${encodeURIComponent(candidateId)}/resume-text`,
-            { timeout: 15000, headers: { 'X-Service-Token': config.service.internalToken } }
-          );
-          resumeText = resumeRes.data?.resumeText || resumeText || '';
-        } catch (_) { /* fallback failed */ }
+      // Check if resume_extract has any entry without position filter (global extract)
+      try {
+        const globalResRows = await db.query(
+          `SELECT extracted_data FROM \`${tenantDb}\`.resume_extract WHERE (candidate_id = ? OR LOWER(REPLACE(candidate_id, '-', '')) = LOWER(REPLACE(?, '-', ''))) LIMIT 1`,
+          [candidateId, candidateId]
+        );
+        const globalResRow = Array.isArray(globalResRows) && globalResRows[0] ? globalResRows[0] : null;
+        const globalText = textFromExtractedData(globalResRow?.extracted_data);
+        if (globalText.length > resumeText.length) resumeText = globalText;
+      } catch (_) {}
+
+      if (!resumeText || resumeText.length < 50) {
+        const candidateServiceUrl = (config.candidateServiceUrl || '').replace(/\/$/, '');
+        if (candidateServiceUrl) {
+          try {
+            const resumeRes = await axios.get(
+              `${candidateServiceUrl}/candidates/${encodeURIComponent(candidateId)}/resume-text`,
+              { timeout: 15000, headers: { 'X-Service-Token': config.service.internalToken } }
+            );
+            resumeText = resumeRes.data?.resumeText || resumeText || '';
+          } catch (_) { /* fallback failed */ }
+        }
       }
     }
 
