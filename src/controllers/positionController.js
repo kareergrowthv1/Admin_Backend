@@ -14,6 +14,7 @@ function parseCreateBody(body) {
         : [];
     return {
         title: body.title,
+        status: body.status,
         domainType: body.domainType,
         minimumExperience: body.minimumExperience != null ? Number(body.minimumExperience) : 0,
         maximumExperience: body.maximumExperience != null ? Number(body.maximumExperience) : 0,
@@ -40,6 +41,7 @@ exports.createPosition = async (req, res, next) => {
         const parsed = parseCreateBody(req.body);
         const {
             title,
+            status,
             domainType,
             minimumExperience,
             maximumExperience,
@@ -55,6 +57,8 @@ exports.createPosition = async (req, res, next) => {
             createdBy
         } = parsed;
 
+        const isDraftSave = String(status || '').toUpperCase() === 'DRAFT';
+
         // Validate required fields
         if (!title || !domainType || !noOfPositions) {
             return res.status(400).json({
@@ -63,7 +67,7 @@ exports.createPosition = async (req, res, next) => {
             });
         }
 
-        if (!mandatorySkills || !Array.isArray(mandatorySkills) || mandatorySkills.length < 2) {
+        if (!isDraftSave && (!mandatorySkills || !Array.isArray(mandatorySkills) || mandatorySkills.length < 2)) {
             return res.status(400).json({
                 success: false,
                 message: 'At least 2 mandatory skills are required'
@@ -75,6 +79,7 @@ exports.createPosition = async (req, res, next) => {
         
         const positionData = {
             title,
+            status,
             domainType,
             minimumExperience: minimumExperience || 0,
             maximumExperience: maximumExperience || 0,
@@ -141,17 +146,21 @@ exports.createPosition = async (req, res, next) => {
  */
 exports.getPositions = async (req, res, next) => {
     try {
-        const { status, search, page = 0, size = 10, domain, experience } = req.query;
+        const { status, search, page = 0, size = 10, domain, experience, dropdown } = req.query;
         const userId = req.headers['x-user-id'] || req.headers['X-User-Id'] || req.headers['X-User-ID'];
+        const requestedSize = parseInt(size) || 10;
+        const normalizedStatus = status ? String(status).toUpperCase() : undefined;
+        const isDropdown = String(dropdown || '').toLowerCase() === 'true' || (requestedSize >= 1000 && normalizedStatus === 'ACTIVE');
 
         const filters = {
-            status,
+            status: normalizedStatus,
             search,
             page: parseInt(page) || 0,
-            size: parseInt(size) || 10,
+            size: requestedSize,
             userId,
             domain,
             experience,
+            dropdown: isDropdown,
             createdBy: req.user?.dataFilter?.createdBy || req.query.createdBy
         };
 

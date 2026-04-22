@@ -6,6 +6,46 @@ const fileStorageUtil = require('../utils/fileStorageUtil');
  * Task Controller for managing academic tasks
  */
 class TaskController {
+    static _schemaCapabilities = null;
+
+    static async getSchemaCapabilities() {
+        if (TaskController._schemaCapabilities) {
+            return TaskController._schemaCapabilities;
+        }
+
+        const tableRows = await db.query(
+            `SELECT table_name
+             FROM information_schema.tables
+             WHERE table_schema = DATABASE()
+               AND table_name IN ('tasks', 'student_tasks', 'task_attachments', 'college_departments', 'college_branches', 'college_subjects')`
+        );
+
+        const columnRows = await db.query(
+            `SELECT table_name, column_name
+             FROM information_schema.columns
+             WHERE table_schema = DATABASE()
+               AND table_name = 'tasks'
+               AND column_name IN ('organization_id', 'created_by', 'subject_id')`
+        );
+
+        const tables = new Set((tableRows || []).map((r) => String(r.table_name || '').toLowerCase()));
+        const columns = new Set((columnRows || []).map((r) => `${String(r.table_name || '').toLowerCase()}.${String(r.column_name || '').toLowerCase()}`));
+
+        TaskController._schemaCapabilities = {
+            hasTasks: tables.has('tasks'),
+            hasStudentTasks: tables.has('student_tasks'),
+            hasTaskAttachments: tables.has('task_attachments'),
+            hasCollegeDepartments: tables.has('college_departments'),
+            hasCollegeBranches: tables.has('college_branches'),
+            hasCollegeSubjects: tables.has('college_subjects'),
+            hasTaskOrganizationId: columns.has('tasks.organization_id'),
+            hasTaskCreatedBy: columns.has('tasks.created_by'),
+            hasTaskSubjectId: columns.has('tasks.subject_id')
+        };
+
+        return TaskController._schemaCapabilities;
+    }
+
     /**
      * @desc Create a new task with attachments and assignments
      * @route POST /tasks
@@ -149,23 +189,39 @@ class TaskController {
         const { dataScope, id: userId } = req.user || {};
 
         try {
+            const caps = await TaskController.getSchemaCapabilities();
+
+            if (!caps.hasTasks || !caps.hasTaskOrganizationId) {
+                return res.status(200).json({ success: true, data: [] });
+            }
+
+            const attachmentCountSql = caps.hasTaskAttachments
+                ? `(SELECT COUNT(*) FROM task_attachments ta WHERE ta.task_id = t.id)`
+                : '0';
+            const totalAssignedSql = caps.hasStudentTasks
+                ? `(SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id)`
+                : '0';
+            const completedCountSql = caps.hasStudentTasks
+                ? `(SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id AND st.status IN ('Completed', 'Reviewed'))`
+                : '0';
+
             let query = `
                 SELECT t.*, 
                 d.name as dept_name,
                 b.name as branch_name,
-                s.name as subject_name,
-                (SELECT COUNT(*) FROM task_attachments ta WHERE ta.task_id = t.id) as attachment_count,
-                (SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id) as total_assigned,
-                (SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id AND st.status IN ('Completed', 'Reviewed')) as completed_count
+                ${caps.hasTaskSubjectId && caps.hasCollegeSubjects ? 's.name' : 'NULL'} as subject_name,
+                ${attachmentCountSql} as attachment_count,
+                ${totalAssignedSql} as total_assigned,
+                ${completedCountSql} as completed_count
                 FROM tasks t
-                LEFT JOIN college_departments d ON t.dept_id = d.id
-                LEFT JOIN college_branches b ON t.branch_id = b.id
-                LEFT JOIN college_subjects s ON t.subject_id = s.id
+                ${caps.hasCollegeDepartments ? 'LEFT JOIN college_departments d ON t.dept_id = d.id' : 'LEFT JOIN (SELECT NULL AS id, NULL AS name) d ON 1=0'}
+                ${caps.hasCollegeBranches ? 'LEFT JOIN college_branches b ON t.branch_id = b.id' : 'LEFT JOIN (SELECT NULL AS id, NULL AS name) b ON 1=0'}
+                ${caps.hasTaskSubjectId && caps.hasCollegeSubjects ? 'LEFT JOIN college_subjects s ON t.subject_id = s.id' : ''}
                 WHERE t.organization_id = ?
             `;
             let params = [organizationId];
 
-            if (dataScope === 'OWN') {
+            if (dataScope === 'OWN' && caps.hasTaskCreatedBy) {
                 query += ' AND t.created_by = ?';
                 params.push(userId);
             }
@@ -203,7 +259,7 @@ class TaskController {
             }
 
             // Multi-select for Semesters
-            if (semester) {
+            if (semester && caps.hasTaskSubjectId && caps.hasCollegeSubjects) {
                 const semesters = Array.isArray(semester) ? semester : semester.split(',').filter(Boolean);
                 if (semesters.length > 0) {
                     query += ` AND s.semester IN (${semesters.map(() => '?').join(',')})`;
@@ -212,7 +268,7 @@ class TaskController {
             }
 
             // Status Filtering (Complex logic maintained)
-            if (status && status !== 'All') {
+            if (status && status !== 'All' && caps.hasStudentTasks) {
                 const statuses = Array.isArray(status) ? status : status.split(',').filter(Boolean);
                 if (statuses.length > 0) {
                     const statusConditions = [];
@@ -370,18 +426,24 @@ class TaskController {
         const { dataScope, id: userId } = req.user || {};
 
         try {
+            const caps = await TaskController.getSchemaCapabilities();
+
+            if (!caps.hasTasks || !caps.hasTaskOrganizationId) {
+                return res.json({ success: true, data: { ALL: 0, PENDING: 0, IN_PROGRESS: 0, COMPLETED: 0 } });
+            }
+
             let query = `
                 SELECT 
                     id,
-                    (SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id) as total,
-                    (SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id AND st.status IN ('Completed', 'Reviewed')) as done,
-                    (SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id AND st.status = 'In Progress') as in_progress
+                    ${caps.hasStudentTasks ? "(SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id)" : '0'} as total,
+                    ${caps.hasStudentTasks ? "(SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id AND st.status IN ('Completed', 'Reviewed'))" : '0'} as done,
+                    ${caps.hasStudentTasks ? "(SELECT COUNT(*) FROM student_tasks st WHERE st.task_id = t.id AND st.status = 'In Progress')" : '0'} as in_progress
                 FROM tasks t
                 WHERE t.organization_id = ?
             `;
             let params = [organizationId];
 
-            if (dataScope === 'OWN') {
+            if (dataScope === 'OWN' && caps.hasTaskCreatedBy) {
                 query += ' AND t.created_by = ?';
                 params.push(userId);
             }

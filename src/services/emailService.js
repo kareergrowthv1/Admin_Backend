@@ -7,6 +7,21 @@ const axios = require('axios');
 const config = require('../config');
 const buildHttpsAgent = require('../utils/buildHttpsAgent');
 
+const getUniqueEmailConfigUrls = (baseUrl) => {
+    const raw = String(baseUrl || '').replace(/\/$/, '');
+    if (!raw) return [];
+
+    const normalized = raw.replace(/\/superadmin$/i, '');
+    const candidates = [
+        `${raw}/superadmin/settings/email`,
+        `${raw}/settings/email`,
+        `${normalized}/superadmin/settings/email`,
+        `${normalized}/settings/email`
+    ];
+
+    return [...new Set(candidates.filter(Boolean))];
+};
+
 const getEmailConfig = async () => {
     const baseUrl = (config.authServiceUrl || process.env.AUTH_SERVICE_URL || '').replace(/\/$/, '');
     const token = config.service?.internalToken || process.env.INTERNAL_SERVICE_TOKEN;
@@ -16,12 +31,26 @@ const getEmailConfig = async () => {
     }
     try {
         const httpsAgent = buildHttpsAgent(baseUrl);
-        const res = await axios.get(`${baseUrl}/superadmin/settings/email`, {
-            timeout: 8000,
-            headers: token ? { 'X-Service-Token': token } : {},
-            httpsAgent
-        });
-        if (res.data?.success && res.data?.data) return res.data.data;
+        const headers = token ? { 'X-Service-Token': token } : {};
+        const urls = getUniqueEmailConfigUrls(baseUrl);
+
+        for (const url of urls) {
+            try {
+                const res = await axios.get(url, {
+                    timeout: 8000,
+                    headers,
+                    httpsAgent
+                });
+                if (res.data?.success && res.data?.data) return res.data.data;
+            } catch (err) {
+                const status = err.response?.status;
+                // Try alternate route variants on 404; continue on auth/network errors too.
+                if (status && status !== 404) {
+                    console.warn(`[emailService] Email config fetch failed at ${url}:`, err.message);
+                }
+            }
+        }
+
         return null;
     } catch (err) {
         console.warn('[emailService] Failed to fetch email config:', err.message);

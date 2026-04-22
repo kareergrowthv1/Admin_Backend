@@ -128,3 +128,31 @@
 [CandidateModel] Found 3 rows, total=3
 [CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
 [CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT * FROM qwikhire_mnnbl6li.college_candidates WHERE organization_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT cc.*, cb.start_year AS batch_start_year, cb.end_year AS batch_end_year FROM qwikhire_mnnbl6li.college_candidates cc LEFT JOIN qwikhire_mnnbl6li, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT cc.*, cb.start_year AS batch_start_year, cb.end_year AS batch_end_year FROM qwikhire_mnnbl6li.college_candidates cc LEFT JOIN qwikhire_mnnbl6li, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT cc.*, cb.start_year AS batch_start_year, cb.end_year AS batch_end_year FROM qwikhire_mnnbl6li.college_candidates cc LEFT JOIN qwikhire_mnnbl6li, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT cc.*, cb.start_year AS batch_start_year, cb.end_year AS batch_end_year FROM qwikhire_mnnbl6li.college_candidates cc LEFT JOIN qwikhire_mnnbl6li, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT cc.*, cb.start_year AS batch_start_year, cb.end_year AS batch_end_year FROM qwikhire_mnnbl6li.college_candidates cc LEFT JOIN qwikhire_mnnbl6li, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT cc.*, cb.start_year AS batch_start_year, cb.end_year AS batch_end_year FROM qwikhire_mnnbl6li.college_candidates cc LEFT JOIN qwikhire_mnnbl6li, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3
+[CandidateModel] getAllCandidates: db=qwikhire_mnnbl6li, q=SELECT cc.*, cb.start_year AS batch_start_year, cb.end_year AS batch_end_year FROM qwikhire_mnnbl6li.college_candidates cc LEFT JOIN qwikhire_mnnbl6li, params=["aecb803f-676d-4f79-b3b4-b993ea6c5a0a",10,0]
+[CandidateModel] Found 3 rows, total=3

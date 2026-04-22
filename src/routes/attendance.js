@@ -183,6 +183,77 @@ router.delete('/departments/:id', rbacMiddleware('departments'), async (req, res
 
 
 /**
+ * @route GET /attendance/branches
+ * @desc Get all branches across departments (used by sidebar /branch route)
+ */
+router.get('/branches', rbacMiddleware('branches'), async (req, res) => {
+    const organizationId = req.user.organizationId || req.headers['x-user-orgid'] || req.query.organizationId;
+    const { dataScope = 'ALL', id: userId } = req.user || {};
+    const { mentor_ids, batches, dept_ids } = req.query;
+
+    try {
+        let query = `
+            SELECT 
+                b.id, b.name, b.code, b.department_id, b.branch_head_id, b.created_by, b.created_at, b.updated_at, b.start_year, b.end_year,
+                d.name AS department_name, d.code AS department_code,
+                u.first_name  AS mentor_first_name,
+                u.last_name   AS mentor_last_name,
+                u.email       AS mentor_email,
+                u.phone_number AS mentor_phone,
+                r.name        AS mentor_role,
+                cu.first_name AS created_by_first_name,
+                cu.last_name  AS created_by_last_name,
+                cu.email      AS created_by_email,
+                (SELECT COUNT(*) FROM \`${req.tenantDb}\`.college_subjects s WHERE s.branch_id = b.id) AS subject_count
+            FROM \`${req.tenantDb}\`.college_branches b
+            LEFT JOIN \`${req.tenantDb}\`.college_departments d ON b.department_id = d.id
+            LEFT JOIN auth_db.users u  ON b.branch_head_id = u.id
+            LEFT JOIN auth_db.users cu ON b.created_by = cu.id
+            LEFT JOIN auth_db.roles r  ON u.role_id = r.id
+            WHERE d.organization_id = ?
+        `;
+        const params = [organizationId];
+
+        if (dataScope === 'OWN') {
+            query += ' AND (b.branch_head_id = ? OR b.created_by = ?)';
+            params.push(userId, userId);
+        }
+
+        if (dept_ids) {
+            const deptIds = Array.isArray(dept_ids) ? dept_ids : dept_ids.split(',').filter(Boolean);
+            if (deptIds.length > 0) {
+                query += ` AND b.department_id IN (${deptIds.map(() => '?').join(',')})`;
+                params.push(...deptIds);
+            }
+        }
+
+        if (mentor_ids) {
+            const mentorIds = Array.isArray(mentor_ids) ? mentor_ids : mentor_ids.split(',').filter(Boolean);
+            if (mentorIds.length > 0) {
+                query += ` AND b.branch_head_id IN (${mentorIds.map(() => '?').join(',')})`;
+                params.push(...mentorIds);
+            }
+        }
+
+        if (batches) {
+            const batchArr = Array.isArray(batches) ? batches : batches.split(',').filter(Boolean);
+            if (batchArr.length > 0) {
+                query += ` AND b.start_year IN (${batchArr.map(() => '?').join(',')})`;
+                params.push(...batchArr);
+            }
+        }
+
+        query += ' ORDER BY b.created_at DESC';
+
+        const rows = await db.query(query, params);
+        res.json({ success: true, data: rows });
+    } catch (err) {
+        console.error('[Attendance] Get branches list failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
  * @route GET /attendance/branches/:deptId
  * @desc Get all branches for a given department (Complete Access)
  */
@@ -195,7 +266,7 @@ router.get('/branches/:deptId', rbacMiddleware('branches'), async (req, res) => 
         let query = `
             SELECT 
                 b.id, b.name, b.code, b.department_id, b.branch_head_id, b.created_by, b.created_at, b.updated_at, b.start_year, b.end_year,
-                d.name AS department_name,
+                d.name AS department_name, d.code AS department_code,
                 -- Incharge details
                 u.first_name  AS mentor_first_name,
                 u.last_name   AS mentor_last_name,
@@ -256,7 +327,7 @@ router.get('/branches/:deptId/:userId', rbacMiddleware('branches'), async (req, 
         let query = `
             SELECT 
                 b.id, b.name, b.code, b.department_id, b.branch_head_id, b.created_by, b.created_at, b.updated_at, b.start_year, b.end_year,
-                d.name AS department_name,
+                d.name AS department_name, d.code AS department_code,
                 -- Incharge details
                 u.first_name  AS mentor_first_name,
                 u.last_name   AS mentor_last_name,
@@ -370,6 +441,88 @@ router.delete('/branches/:id', rbacMiddleware('branches'), async (req, res) => {
 });
 
 /**
+ * @route GET /attendance/subjects
+ * @desc Get all subjects across branches (used by sidebar /subjects route)
+ */
+router.get('/subjects', rbacMiddleware('subjects'), async (req, res) => {
+    const organizationId = req.user.organizationId || req.headers['x-user-orgid'] || req.query.organizationId;
+    const { dataScope = 'ALL', id: userId } = req.user || {};
+    const { semester, teacher_ids, branch_ids } = req.query;
+
+    try {
+        let query = `
+            SELECT 
+                s.id, s.name, s.code, s.branch_id, s.teacher_id, s.created_by, s.created_at, s.updated_at, s.semester,
+                b.name AS branch_name, b.code AS branch_code, b.start_year, b.end_year,
+                d.name AS department_name, d.code AS department_code,
+                u.first_name  AS teacher_first_name,
+                u.last_name   AS teacher_last_name,
+                u.email       AS teacher_email,
+                u.phone_number AS teacher_phone,
+                r.name        AS teacher_role,
+                cu.first_name AS created_by_first_name,
+                cu.last_name  AS created_by_last_name,
+                cu.email      AS created_by_email,
+                 (SELECT COUNT(*)
+                  FROM \`${req.tenantDb}\`.college_candidates c
+                  WHERE c.organization_id = d.organization_id
+                    AND c.branch_id = s.branch_id
+                    AND c.subjects IS NOT NULL
+                    AND TRIM(c.subjects) != ''
+                    AND (
+                        (JSON_VALID(c.subjects) = 1 AND JSON_CONTAINS(c.subjects, JSON_QUOTE(s.id), '$'))
+                        OR FIND_IN_SET(s.id, REPLACE(c.subjects, ' ', '')) > 0
+                    )) AS student_count
+            FROM \`${req.tenantDb}\`.college_subjects s
+            LEFT JOIN \`${req.tenantDb}\`.college_branches b ON s.branch_id = b.id
+            LEFT JOIN \`${req.tenantDb}\`.college_departments d ON b.department_id = d.id
+            LEFT JOIN auth_db.users u  ON s.teacher_id = u.id
+            LEFT JOIN auth_db.users cu ON s.created_by = cu.id
+            LEFT JOIN auth_db.roles r  ON u.role_id = r.id
+            WHERE d.organization_id = ?
+        `;
+        const params = [organizationId];
+
+        if (dataScope === 'OWN') {
+            query += ' AND (s.teacher_id = ? OR s.created_by = ?)';
+            params.push(userId, userId);
+        }
+
+        if (branch_ids) {
+            const branchIds = Array.isArray(branch_ids) ? branch_ids : branch_ids.split(',').filter(Boolean);
+            if (branchIds.length > 0) {
+                query += ` AND s.branch_id IN (${branchIds.map(() => '?').join(',')})`;
+                params.push(...branchIds);
+            }
+        }
+
+        if (semester) {
+            const semesters = Array.isArray(semester) ? semester : semester.split(',').filter(Boolean);
+            if (semesters.length > 0) {
+                query += ` AND s.semester IN (${semesters.map(() => '?').join(',')})`;
+                params.push(...semesters);
+            }
+        }
+
+        if (teacher_ids) {
+            const teacherIds = Array.isArray(teacher_ids) ? teacher_ids : teacher_ids.split(',').filter(Boolean);
+            if (teacherIds.length > 0) {
+                query += ` AND s.teacher_id IN (${teacherIds.map(() => '?').join(',')})`;
+                params.push(...teacherIds);
+            }
+        }
+
+        query += ' ORDER BY s.created_at DESC';
+
+        const rows = await db.query(query, params);
+        res.json({ success: true, data: rows });
+    } catch (err) {
+        console.error('[Attendance] Get subjects list failed:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
  * @route GET /attendance/subjects/:branchId
  * @desc Get all subjects for a branch (Complete Access)
  */
@@ -382,7 +535,8 @@ router.get('/subjects/:branchId', rbacMiddleware('subjects'), async (req, res) =
         let query = `
             SELECT 
                 s.id, s.name, s.code, s.branch_id, s.teacher_id, s.created_by, s.created_at, s.updated_at, s.semester,
-                b.name AS branch_name, d.name AS department_name,
+                b.name AS branch_name, b.code AS branch_code, b.start_year, b.end_year,
+                d.name AS department_name, d.code AS department_code,
                 -- Teacher details
                 u.first_name  AS teacher_first_name,
                 u.last_name   AS teacher_last_name,
@@ -393,7 +547,16 @@ router.get('/subjects/:branchId', rbacMiddleware('subjects'), async (req, res) =
                 cu.first_name AS created_by_first_name,
                 cu.last_name  AS created_by_last_name,
                 cu.email      AS created_by_email,
-                (SELECT COUNT(*) FROM \`${req.tenantDb}\`.college_candidates c WHERE c.branch_id = s.branch_id) AS student_count
+                 (SELECT COUNT(*)
+                  FROM \`${req.tenantDb}\`.college_candidates c
+                  WHERE c.organization_id = d.organization_id
+                    AND c.branch_id = s.branch_id
+                    AND c.subjects IS NOT NULL
+                    AND TRIM(c.subjects) != ''
+                    AND (
+                        (JSON_VALID(c.subjects) = 1 AND JSON_CONTAINS(c.subjects, JSON_QUOTE(s.id), '$'))
+                        OR FIND_IN_SET(s.id, REPLACE(c.subjects, ' ', '')) > 0
+                    )) AS student_count
             FROM \`${req.tenantDb}\`.college_subjects s
             LEFT JOIN \`${req.tenantDb}\`.college_branches b ON s.branch_id = b.id
             LEFT JOIN \`${req.tenantDb}\`.college_departments d ON b.department_id = d.id
@@ -443,7 +606,8 @@ router.get('/subjects/:branchId/:userId', rbacMiddleware('subjects'), async (req
         let query = `
             SELECT 
                 s.id, s.name, s.code, s.branch_id, s.teacher_id, s.created_by, s.created_at, s.updated_at, s.semester,
-                b.name AS branch_name, d.name AS department_name,
+                b.name AS branch_name, b.code AS branch_code, b.start_year, b.end_year,
+                d.name AS department_name, d.code AS department_code,
                 -- Teacher details
                 u.first_name  AS teacher_first_name,
                 u.last_name   AS teacher_last_name,
@@ -454,7 +618,16 @@ router.get('/subjects/:branchId/:userId', rbacMiddleware('subjects'), async (req
                 cu.first_name AS created_by_first_name,
                 cu.last_name  AS created_by_last_name,
                 cu.email      AS created_by_email,
-                (SELECT COUNT(*) FROM \`${req.tenantDb}\`.college_candidates c WHERE c.branch_id = s.branch_id) AS student_count
+                 (SELECT COUNT(*)
+                  FROM \`${req.tenantDb}\`.college_candidates c
+                  WHERE c.organization_id = d.organization_id
+                    AND c.branch_id = s.branch_id
+                    AND c.subjects IS NOT NULL
+                    AND TRIM(c.subjects) != ''
+                    AND (
+                        (JSON_VALID(c.subjects) = 1 AND JSON_CONTAINS(c.subjects, JSON_QUOTE(s.id), '$'))
+                        OR FIND_IN_SET(s.id, REPLACE(c.subjects, ' ', '')) > 0
+                    )) AS student_count
             FROM \`${req.tenantDb}\`.college_subjects s
             LEFT JOIN \`${req.tenantDb}\`.college_branches b ON s.branch_id = b.id
             LEFT JOIN \`${req.tenantDb}\`.college_departments d ON b.department_id = d.id
@@ -806,18 +979,38 @@ router.get('/:deptId/:branchId/:subjectId/sheet', rbacMiddleware('ATTENDANCE'), 
     const month = req.query.month || (now.getMonth() + 1);
     const year = req.query.year || now.getFullYear();
 
-    if (!branchId) {
-        return res.status(400).json({ success: false, message: 'Branch ID strictly required' });
-    }
+    const isInvalidParam = (v) => !v || String(v).trim() === '' || v === 'undefined' || v === 'null';
 
     try {
+        let effectiveBranchId = branchId;
+
+        // Support routes where branchId is missing/undefined by resolving it from subject.
+        if (isInvalidParam(effectiveBranchId) && !isInvalidParam(subjectId)) {
+            const subjectCtx = await db.query(
+                `SELECT s.branch_id
+                 FROM \`${req.tenantDb}\`.college_subjects s
+                 LEFT JOIN \`${req.tenantDb}\`.college_branches b ON b.id = s.branch_id
+                 LEFT JOIN \`${req.tenantDb}\`.college_departments d ON d.id = b.department_id
+                 WHERE s.id = ? AND d.organization_id = ?
+                 LIMIT 1`,
+                [subjectId, organizationId]
+            );
+            if (subjectCtx && subjectCtx.length > 0) {
+                effectiveBranchId = subjectCtx[0].branch_id;
+            }
+        }
+
+        if (isInvalidParam(effectiveBranchId)) {
+            return res.status(400).json({ success: false, message: 'Valid branch ID is required for attendance sheet' });
+        }
+
         // 1. Get all students in this branch
         const allStudents = await db.query(`
             SELECT c.candidate_id, c.candidate_name, c.register_no, c.subjects, c.created_at
             FROM \`${req.tenantDb}\`.college_candidates c
             WHERE c.branch_id = ? AND c.organization_id = ? AND c.status = 'Active'
             ORDER BY c.created_at DESC
-        `, [branchId, organizationId]);
+        `, [effectiveBranchId, organizationId]);
 
         // Filter explicitly to keep ONLY participants mapped perfectly to this subject
         const students = allStudents.filter(r => {
@@ -968,6 +1161,321 @@ router.get('/unmapped-students/:branchId', rbacMiddleware('ATTENDANCE'), async (
     } catch (err) {
         console.error('[Attendance] Lookup completely failed natively:', err);
         res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route POST /attendance/import-students/preview
+ * @desc Validate CSV/XLSX rows against the current sheet context and return row-wise preview status
+ */
+router.post('/import-students/preview', rbacMiddleware('ATTENDANCE'), async (req, res) => {
+    const organizationId = req.user.organizationId || req.headers['x-user-orgid'];
+    const { deptId, branchId, subjectId, rows } = req.body || {};
+
+    if (!branchId || !subjectId || !Array.isArray(rows)) {
+        return res.status(400).json({ success: false, message: 'branchId, subjectId and rows[] are required' });
+    }
+
+    try {
+        const subjectRows = await db.query(
+            `SELECT s.id, s.name AS subject_name, s.branch_id, s.semester, b.department_id, b.name AS branch_name, d.name AS department_name
+             FROM \`${req.tenantDb}\`.college_subjects s
+             LEFT JOIN \`${req.tenantDb}\`.college_branches b ON b.id = s.branch_id
+             LEFT JOIN \`${req.tenantDb}\`.college_departments d ON d.id = b.department_id
+             WHERE s.id = ? AND d.organization_id = ?
+             LIMIT 1`,
+            [subjectId, organizationId]
+        );
+
+        if (!subjectRows || subjectRows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Subject not found for this organization' });
+        }
+
+        const subjectCtx = subjectRows[0];
+        const effectiveDeptId = deptId && deptId !== 'undefined' ? String(deptId) : String(subjectCtx.department_id || '');
+        const effectiveBranchId = String(branchId);
+        const effectiveSubjectId = String(subjectId);
+        const effectiveDepartmentName = String(subjectCtx.department_name || '').trim().toLowerCase();
+        const effectiveBranchName = String(subjectCtx.branch_name || '').trim().toLowerCase();
+        const effectiveSubjectName = String(subjectCtx.subject_name || '').trim().toLowerCase();
+        const effectiveSemester = subjectCtx.semester != null ? String(subjectCtx.semester) : '';
+
+        const registerNos = rows
+            .map((r) => String(r.register_no || r.registerNo || r.usn || '').trim())
+            .filter(Boolean);
+
+        const emails = rows
+            .map((r) => String(r.email || r.candidate_email || '').trim().toLowerCase())
+            .filter(Boolean);
+
+        let candidatesByRegNo = new Map();
+        let candidatesByEmail = new Map();
+        if (registerNos.length > 0) {
+            const candidateRows = await db.query(
+                `SELECT c.candidate_id, c.candidate_name, c.register_no, c.email, c.dept_id, c.branch_id, c.semester, c.subjects, c.status
+                 FROM \`${req.tenantDb}\`.college_candidates c
+                 WHERE c.organization_id = ? AND c.register_no IN (?)`,
+                [organizationId, registerNos]
+            );
+            candidatesByRegNo = new Map((candidateRows || []).map((c) => [String(c.register_no || '').trim(), c]));
+        }
+
+        if (emails.length > 0) {
+            const emailRows = await db.query(
+                `SELECT c.candidate_id, c.email
+                 FROM \`${req.tenantDb}\`.college_candidates c
+                 WHERE c.organization_id = ? AND LOWER(TRIM(c.email)) IN (?)`,
+                [organizationId, emails]
+            );
+            candidatesByEmail = new Map((emailRows || []).map((c) => [String(c.email || '').trim().toLowerCase(), c]));
+        }
+
+        const parseSubjects = (raw) => {
+            if (!raw) return [];
+            try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) return parsed.map((x) => String(x));
+            } catch (e) {
+                // fall through to CSV parser
+            }
+            return String(raw)
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean)
+                .map((x) => String(x));
+        };
+
+        const previewRows = rows.map((row, idx) => {
+            const rowNo = idx + 1;
+            const registerNo = String(row.register_no || row.registerNo || row.usn || '').trim();
+            const rowEmailRaw = String(row.email || row.candidate_email || '').trim();
+            const rowEmail = rowEmailRaw.toLowerCase();
+            const rowDepartmentName = String(row.department_name || row.department || '').trim().toLowerCase();
+            const rowBranchName = String(row.branch_name || row.branch || row.batch || '').trim().toLowerCase();
+            const rowSemester = String(row.semester || '').trim();
+            const rowSubjectName = String(row.subject_name || row.subject || '').trim().toLowerCase();
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+            const missing = [];
+            if (!registerNo) missing.push('register_no');
+            if (!rowDepartmentName) missing.push('department_name');
+            if (!rowBranchName) missing.push('branch_name');
+            if (!rowSemester) missing.push('semester');
+            if (!rowSubjectName) missing.push('subject_name');
+
+            if (missing.length > 0) {
+                return {
+                    rowNo,
+                    register_no: registerNo || '-',
+                    candidate_name: String(row.candidate_name || row.name || ''),
+                    valid: false,
+                    reason: `Missing: ${missing.join(', ')}`,
+                };
+            }
+
+            if (rowDepartmentName !== effectiveDepartmentName || rowBranchName !== effectiveBranchName || rowSubjectName !== effectiveSubjectName) {
+                return {
+                    rowNo,
+                    register_no: registerNo,
+                    candidate_name: String(row.candidate_name || row.name || ''),
+                    valid: false,
+                    reason: 'Row context does not match this sheet (department/branch/subject)',
+                };
+            }
+
+            if (effectiveSemester && String(rowSemester) !== effectiveSemester) {
+                return {
+                    rowNo,
+                    register_no: registerNo,
+                    candidate_name: String(row.candidate_name || row.name || ''),
+                    valid: false,
+                    reason: `Semester mismatch (sheet: ${effectiveSemester}, row: ${rowSemester})`,
+                };
+            }
+
+            const candidate = candidatesByRegNo.get(registerNo);
+            if (!candidate) {
+                return {
+                    rowNo,
+                    register_no: registerNo,
+                    candidate_name: String(row.candidate_name || row.name || ''),
+                    valid: false,
+                    reason: 'Student not found by register number',
+                };
+            }
+
+            if (rowEmail) {
+                if (!emailRegex.test(rowEmail)) {
+                    return {
+                        rowNo,
+                        register_no: registerNo,
+                        candidate_name: candidate.candidate_name,
+                        candidate_id: candidate.candidate_id,
+                        valid: false,
+                        reason: 'Invalid email format in file',
+                    };
+                }
+
+                const emailCandidate = candidatesByEmail.get(rowEmail);
+                if (!emailCandidate) {
+                    return {
+                        rowNo,
+                        register_no: registerNo,
+                        candidate_name: candidate.candidate_name,
+                        candidate_id: candidate.candidate_id,
+                        valid: false,
+                        reason: 'Email not found in college candidates',
+                    };
+                }
+
+                if (String(emailCandidate.candidate_id || '') !== String(candidate.candidate_id || '')) {
+                    return {
+                        rowNo,
+                        register_no: registerNo,
+                        candidate_name: candidate.candidate_name,
+                        candidate_id: candidate.candidate_id,
+                        valid: false,
+                        reason: 'Email does not match register number candidate',
+                    };
+                }
+            }
+
+            if (String(candidate.status || '').toLowerCase() !== 'active') {
+                return {
+                    rowNo,
+                    register_no: registerNo,
+                    candidate_name: candidate.candidate_name,
+                    candidate_id: candidate.candidate_id,
+                    valid: false,
+                    reason: 'Student is not active',
+                };
+            }
+
+            if (String(candidate.branch_id || '') !== effectiveBranchId || (effectiveDeptId && String(candidate.dept_id || '') !== effectiveDeptId)) {
+                return {
+                    rowNo,
+                    register_no: registerNo,
+                    candidate_name: candidate.candidate_name,
+                    candidate_id: candidate.candidate_id,
+                    valid: false,
+                    reason: 'Student department/branch does not match this sheet',
+                };
+            }
+
+            if (effectiveSemester && String(candidate.semester || '') && String(candidate.semester) !== effectiveSemester) {
+                return {
+                    rowNo,
+                    register_no: registerNo,
+                    candidate_name: candidate.candidate_name,
+                    candidate_id: candidate.candidate_id,
+                    valid: false,
+                    reason: 'Student semester does not match this sheet',
+                };
+            }
+
+            const existingSubjects = parseSubjects(candidate.subjects);
+            if (existingSubjects.includes(effectiveSubjectId)) {
+                return {
+                    rowNo,
+                    register_no: registerNo,
+                    candidate_name: candidate.candidate_name,
+                    candidate_id: candidate.candidate_id,
+                    valid: false,
+                    reason: 'Already mapped to this subject',
+                };
+            }
+
+            return {
+                rowNo,
+                register_no: registerNo,
+                candidate_name: candidate.candidate_name,
+                candidate_id: candidate.candidate_id,
+                valid: true,
+                reason: 'Matched to current sheet context',
+            };
+        });
+
+        const validCount = previewRows.filter((r) => r.valid).length;
+
+        return res.json({
+            success: true,
+            data: previewRows,
+            summary: {
+                total: previewRows.length,
+                valid: validCount,
+                invalid: previewRows.length - validCount,
+                context: {
+                    deptId: effectiveDeptId,
+                    branchId: effectiveBranchId,
+                    subjectId: effectiveSubjectId,
+                    semester: effectiveSemester || null,
+                },
+            },
+        });
+    } catch (err) {
+        console.error('[Attendance] Preview validation failed:', err);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+/**
+ * @route GET /attendance/sheet-context/:subjectId
+ * @desc Resolve readable department/branch/batch/subject context for attendance sheet import popup
+ */
+router.get('/sheet-context/:subjectId', rbacMiddleware('ATTENDANCE'), async (req, res) => {
+    const organizationId = req.user.organizationId || req.headers['x-user-orgid'];
+    const { subjectId } = req.params;
+
+    if (!subjectId) {
+        return res.status(400).json({ success: false, message: 'subjectId is required' });
+    }
+
+    try {
+        const rows = await db.query(
+            `SELECT
+                s.id AS subject_id,
+                s.name AS subject_name,
+                s.code AS subject_code,
+                s.semester AS subject_semester,
+                b.id AS branch_id,
+                b.name AS branch_name,
+                b.code AS branch_code,
+                b.start_year,
+                b.end_year,
+                d.id AS department_id,
+                d.name AS department_name,
+                d.code AS department_code
+             FROM \`${req.tenantDb}\`.college_subjects s
+             LEFT JOIN \`${req.tenantDb}\`.college_branches b ON b.id = s.branch_id
+             LEFT JOIN \`${req.tenantDb}\`.college_departments d ON d.id = b.department_id
+             WHERE s.id = ? AND d.organization_id = ?
+             LIMIT 1`,
+            [subjectId, organizationId]
+        );
+
+        if (!rows || rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Sheet context not found' });
+        }
+
+        const row = rows[0];
+        return res.json({
+            success: true,
+            data: {
+                departmentId: row.department_id || null,
+                departmentName: row.department_name || null,
+                branchId: row.branch_id || null,
+                branchName: row.branch_name || null,
+                subjectId: row.subject_id || null,
+                subjectName: row.subject_name || null,
+                semester: row.subject_semester != null ? String(row.subject_semester) : null,
+                batch: row.start_year && row.end_year ? `${row.start_year} - ${row.end_year}` : null,
+                startYear: row.start_year || null,
+                endYear: row.end_year || null,
+            },
+        });
+    } catch (err) {
+        console.error('[Attendance] Get sheet context failed:', err);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
     }
 });
 

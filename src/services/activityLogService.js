@@ -122,7 +122,7 @@ class ActivityLogService {
         try {
             await this.ensureTableExists(tenantDb);
 
-            const { activityType, hours, limit = 50, actorId } = filters;
+            const { activityType, hours, limit = 10, offset = 0, actorId } = filters;
             const orgId = String(organizationId).trim();
             
             let sql = `
@@ -164,8 +164,9 @@ class ActivityLogService {
                 }
             }
 
-            sql += ` ORDER BY created_at DESC LIMIT ?`;
-            params.push(limit);
+            sql += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+            params.push(Math.min(Number(limit) || 10, 10));
+            params.push(Math.max(Number(offset) || 0, 0));
 
             const rows = await db.query(sql, params);
             
@@ -245,6 +246,52 @@ class ActivityLogService {
         } catch (error) {
             console.error('[ActivityLogService] Error fetching activities:', error);
             return [];
+        }
+    }
+
+    /**
+     * Get total count of activities for current filters.
+     */
+    static async getRecentActivitiesCount(tenantDb, organizationId, filters = {}) {
+        if (!tenantDb || !organizationId) return 0;
+
+        try {
+            await this.ensureTableExists(tenantDb);
+
+            const { activityType, hours, actorId } = filters;
+            const orgId = String(organizationId).trim();
+
+            let sql = `
+                SELECT COUNT(*) as total
+                FROM \`${tenantDb}\`.activity_logs
+                WHERE organization_id = ?
+            `;
+            const params = [orgId];
+
+            if (hours) {
+                sql += ` AND created_at >= DATE_SUB(NOW(), INTERVAL ? HOUR)`;
+                params.push(hours);
+            }
+
+            if (actorId) {
+                sql += ` AND actor_id = ?`;
+                params.push(actorId);
+            }
+
+            if (activityType && activityType !== 'ALL') {
+                if (activityType === 'EMAILS') {
+                    sql += ` AND activity_type IN ('MASS_EMAIL', 'SINGLE_EMAIL')`;
+                } else {
+                    sql += ` AND activity_type = ?`;
+                    params.push(activityType);
+                }
+            }
+
+            const [row] = await db.query(sql, params);
+            return Number(row?.total || 0);
+        } catch (error) {
+            console.error('[ActivityLogService] Error fetching activities count:', error);
+            return 0;
         }
     }
 
