@@ -6,6 +6,28 @@ const bcrypt = require('bcryptjs');
  * RBAC Service for managing roles, users and permissions in auth_db
  */
 class RBACService {
+    constructor() {
+        this._rolesCreatedByColumnEnsured = false;
+    }
+
+    async ensureRolesCreatedByColumn() {
+        if (this._rolesCreatedByColumnEnsured) return;
+
+        const colRows = await db.authQuery(
+            `SELECT COUNT(*) as cnt
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = 'roles'
+               AND COLUMN_NAME = 'created_by'`
+        );
+
+        if (!colRows[0] || colRows[0].cnt === 0) {
+            await db.authQuery('ALTER TABLE roles ADD COLUMN created_by CHAR(36) NULL AFTER organization_id');
+        }
+
+        this._rolesCreatedByColumnEnsured = true;
+    }
+
     // Roles
     async getRolesByOrganization(organizationId, createdBy = null) {
         let query = 'SELECT * FROM roles WHERE organization_id = ? AND deleted_at IS NULL';
@@ -34,6 +56,9 @@ class RBACService {
     async createRole(organizationId, roleData, creatorId = null) {
         const { name, description, isSystem = 0, permissions } = roleData;
         const id = uuidv4();
+
+        // Hosted environments can be behind on migrations; ensure this once before inserts.
+        await this.ensureRolesCreatedByColumn();
 
         // Auto-generate code e.g., ROLE0001
         const latestRoleRows = await db.authQuery(

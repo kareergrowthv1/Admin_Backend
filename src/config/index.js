@@ -1,14 +1,17 @@
 const path = require('path');
 const dotenv = require('dotenv');
 
+// Determine runtime mode from real environment (before reading project .env files).
+const runtimeNodeEnv = String(process.env.NODE_ENV || '').toLowerCase();
+const isHostedRuntime = Boolean(process.env.RENDER || process.env.RENDER_EXTERNAL_URL);
+const isProductionRuntime = runtimeNodeEnv === 'production';
+
 // Always load base env first.
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 // Load local overrides only for local development.
 // In hosted environments (Render/etc.) or production, never apply .env.local.
-const isHostedRuntime = Boolean(process.env.RENDER || process.env.RENDER_EXTERNAL_URL);
-const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
-if (!isHostedRuntime && !isProduction) {
+if (!isHostedRuntime && !isProductionRuntime) {
 	dotenv.config({ path: path.resolve(__dirname, '../../.env.local'), override: true });
 }
 

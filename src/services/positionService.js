@@ -118,6 +118,7 @@ const getNextPositionCode = async (tenantDb) => {
 const createPosition = async (tenantDb, positionData) => {
     const {
         title,
+        status,
         domainType,
         minimumExperience,
         maximumExperience,
@@ -132,6 +133,14 @@ const createPosition = async (tenantDb, positionData) => {
         createdBy,
         userId
     } = positionData;
+
+    const effectiveStatus = String(status || 'ACTIVE').toUpperCase();
+    const validStatuses = ['ACTIVE', 'CLOSED', 'ON_HOLD', 'DRAFT', 'EXPIRED', 'INACTIVE'];
+    if (!validStatuses.includes(effectiveStatus)) {
+        const error = new Error(`Invalid status. Allowed values: ${validStatuses.join(', ')}`);
+        error.status = 400;
+        throw error;
+    }
 
     let resolvedTenantDb = tenantDb;
 
@@ -159,7 +168,7 @@ const createPosition = async (tenantDb, positionData) => {
         throw error;
     }
 
-    if (mandatorySkills.length < 2) {
+    if (effectiveStatus !== 'DRAFT' && mandatorySkills.length < 2) {
         const error = new Error('At least 2 mandatory skills are required');
         error.status = 400;
         throw error;
@@ -251,37 +260,39 @@ const createPosition = async (tenantDb, positionData) => {
                     noOfPositions,
                     jobDescriptionPath || null,
                     jobDescriptionFileName || null,
-                    'ACTIVE', // Default status to ACTIVE
+                    effectiveStatus,
                     toNormalizedDate(expectedStartDate),
                     toNormalizedDate(applicationDeadline),
                     company_name || null,
                     createdBy
                 ]);
 
-                // Log activity
-                try {
-                    await ActivityLogService.logActivity(resolvedTenantDb, {
-                        organizationId: (positionData.organizationId || positionData.organization_id),
-                        actorId: userId || createdBy,
-                        actorName: positionData.actorName || 'Admin',
-                        actorRole: positionData.actorRole || 'Admin',
-                        activityType: 'JOB_POSTED',
-                        activityTitle: title, // Use position title directly
-                        activityDescription: jobDescriptionFileName 
-                            ? `New position "${title}" created with ${noOfPositions} openings. JD: ${jobDescriptionFileName}`
-                            : `New position "${title}" created with ${noOfPositions} openings.`,
-                        entityId: positionId,
-                        entityType: 'POSITION',
-                        metadata: {
-                            positionName: title,
-                            positionId: positionCode,
-                            domainType,
-                            noOfPositions,
-                            jdFile: jobDescriptionFileName
-                        }
-                    });
-                } catch (logErr) {
-                    console.warn('[PositionService] Activity logging failed:', logErr.message);
+                // Log as posted activity only for active postings.
+                if (effectiveStatus === 'ACTIVE') {
+                    try {
+                        await ActivityLogService.logActivity(resolvedTenantDb, {
+                            organizationId: (positionData.organizationId || positionData.organization_id),
+                            actorId: userId || createdBy,
+                            actorName: positionData.actorName || 'Admin',
+                            actorRole: positionData.actorRole || 'Admin',
+                            activityType: 'JOB_POSTED',
+                            activityTitle: title,
+                            activityDescription: jobDescriptionFileName
+                                ? `New position "${title}" created with ${noOfPositions} openings. JD: ${jobDescriptionFileName}`
+                                : `New position "${title}" created with ${noOfPositions} openings.`,
+                            entityId: positionId,
+                            entityType: 'POSITION',
+                            metadata: {
+                                positionName: title,
+                                positionId: positionCode,
+                                domainType,
+                                noOfPositions,
+                                jdFile: jobDescriptionFileName
+                            }
+                        });
+                    } catch (logErr) {
+                        console.warn('[PositionService] Activity logging failed:', logErr.message);
+                    }
                 }
 
                 inserted = true;
@@ -353,7 +364,7 @@ const createPosition = async (tenantDb, positionData) => {
             maximumExperience,
             jobDescriptionDocumentPath: jobDescriptionPath,
             jobDescriptionDocumentFileName: jobDescriptionFileName,
-            status: 'ACTIVE',
+            status: effectiveStatus,
             noOfPositions: noOfPositions,
             createdBy: createdBy,
             interviewInviteSent: 0,
@@ -383,7 +394,7 @@ const createPosition = async (tenantDb, positionData) => {
  */
 const getPositions = async (tenantDb, filters = {}) => {
     try {
-        const { status, search, limit = 10, offset = 0, page = 0, size = 10, userId, domain, experience, createdBy } = filters;
+        const { status, search, limit = 10, offset = 0, page = 0, size = 10, userId, domain, experience, createdBy, dropdown = false } = filters;
         const limitNum = parseInt(size) || 10;
         const offsetNum = (parseInt(page) * limitNum) || 0;
 
@@ -413,6 +424,45 @@ const getPositions = async (tenantDb, filters = {}) => {
         const existingTables = (tableCheck || []).map(t => t.TABLE_NAME);
         const useJobs = existingTables.includes('jobs');
         const tableName = useJobs ? 'jobs' : 'positions';
+
+        if (dropdown) {
+            const statusCol = useJobs ? 'p.status' : 'p.position_status';
+            const titleCol = useJobs ? 'p.job_title' : 'p.title';
+            const rows = await db.query(
+                `SELECT
+                    HEX(p.id) as id,
+                    p.code,
+                    ${titleCol} as title,
+                    ${statusCol} as status,
+                    p.created_at as createdAt,
+                    p.updated_at as updatedAt
+                 FROM \`${resolvedTenantDb}\`.\`${tableName}\` p
+                 WHERE ${statusCol} = 'ACTIVE'
+                 ORDER BY p.updated_at DESC, p.created_at DESC
+                 LIMIT ? OFFSET ?`,
+                [limitNum, offsetNum]
+            );
+
+            const countResult = await db.query(
+                `SELECT COUNT(*) as total FROM \`${resolvedTenantDb}\`.\`${tableName}\` p WHERE ${statusCol} = 'ACTIVE'`
+            );
+            const totalElements = countResult[0]?.total || 0;
+
+            const positions = (rows || []).map((position) => ({
+                id: formatPositionId(position.id),
+                title: position.title,
+                code: position.code,
+                status: position.status,
+                timestamp: position.updatedAt || position.createdAt,
+                createdAt: position.createdAt,
+                updatedAt: position.updatedAt
+            }));
+
+            return {
+                positions,
+                totalElements
+            };
+        }
 
         let query = `
             SELECT 
@@ -777,6 +827,7 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
 
         const {
             title,
+            status,
             domainType,
             minimumExperience,
             maximumExperience,
@@ -797,6 +848,17 @@ const updatePosition = async (tenantDb, positionId, updateData, userId) => {
         if (title !== undefined) {
             updateFields.push('title = ?');
             params.push(title);
+        }
+        if (status !== undefined) {
+            const normalizedStatus = String(status).toUpperCase();
+            const validStatuses = ['ACTIVE', 'CLOSED', 'ON_HOLD', 'DRAFT', 'EXPIRED', 'INACTIVE'];
+            if (!validStatuses.includes(normalizedStatus)) {
+                const error = new Error(`Invalid status. Allowed values: ${validStatuses.join(', ')}`);
+                error.status = 400;
+                throw error;
+            }
+            updateFields.push('position_status = ?');
+            params.push(normalizedStatus);
         }
         if (domainType !== undefined) {
             updateFields.push('domain_type = ?');

@@ -57,15 +57,34 @@ router.get('/activities', authMiddleware, tenantMiddleware, rbacMiddleware('dash
         if (!organizationId) {
             return res.status(400).json({ success: false, message: 'organization_id is required' });
         }
+
+        const page = Math.max(parseInt(req.query.page, 10) || 0, 0);
+        const requestedPageSize = Math.max(parseInt(req.query.pageSize, 10) || 10, 1);
+        const limit = Math.min(requestedPageSize, 10); // Hard cap from backend: never return more than 10 records per request.
         const filters = {
             activityType: req.query.activityType || 'ALL',
             hours: req.query.hours ? parseInt(req.query.hours) : null,
-            limit: parseInt(req.query.limit) || 50,
+            limit,
+            offset: page * limit,
             actorId: req.user?.dataFilter?.createdBy || req.query.actorId
         };
 
         const activities = await ActivityLogService.getRecentActivities(req.tenantDb, organizationId, filters);
-        res.status(200).json({ success: true, data: activities });
+        const totalElements = await ActivityLogService.getRecentActivitiesCount(req.tenantDb, organizationId, filters);
+        const totalPages = Math.ceil(totalElements / limit);
+
+        res.status(200).json({
+            success: true,
+            data: activities,
+            pagination: {
+                page,
+                pageSize: limit,
+                totalElements,
+                totalPages,
+                hasNext: page < Math.max(totalPages - 1, 0),
+                hasPrev: page > 0,
+            },
+        });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }

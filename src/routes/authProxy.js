@@ -15,13 +15,23 @@ if (!authBase) {
   console.warn('[authProxy] AUTH_SERVICE_URL not set; GET /auth/users/:id will return 503.');
 }
 
+function buildFallbackAuthBase(req) {
+  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || '';
+  const host = String(hostHeader).split(',')[0].trim().split(':')[0];
+  if (!host) return '';
+  return `https://${host}:8441`;
+}
+
 router.get('/users/:id', authMiddleware, async (req, res) => {
   try {
-    if (!authBase) {
+    const fallbackAuthBase = buildFallbackAuthBase(req);
+    const candidateBases = [authBase, fallbackAuthBase].filter(Boolean);
+
+    if (candidateBases.length === 0) {
       return res.status(503).json({ success: false, message: 'Auth service URL not configured' });
     }
+
     const userId = req.params.id;
-    const url = `${authBase}/users/${userId}`;
     const headers = {};
     // Prefer trusted service-to-service auth for proxy calls.
     if (config.service && config.service.internalToken) {
@@ -42,14 +52,24 @@ router.get('/users/:id', authMiddleware, async (req, res) => {
     if (req.headers.authorization) headers.Authorization = req.headers.authorization;
     if (req.headers.cookie) headers.Cookie = req.headers.cookie;
 
-    const httpsAgent = buildHttpsAgent(authBase);
-    const response = await axios.get(url, {
-      headers,
-      httpsAgent,
-      timeout: 10000,
-      validateStatus: () => true
-    });
-    res.status(response.status).json(response.data);
+    let lastError = null;
+    for (const base of candidateBases) {
+      try {
+        const httpsAgent = buildHttpsAgent(base);
+        const response = await axios.get(`${base}/users/${userId}`, {
+          headers,
+          httpsAgent,
+          timeout: 10000,
+          validateStatus: () => true
+        });
+        return res.status(response.status).json(response.data);
+      } catch (proxyErr) {
+        lastError = proxyErr;
+      }
+    }
+
+    console.error('[authProxy] GET /users/:id error:', lastError?.message || 'Unknown proxy error');
+    return res.status(502).json({ success: false, message: 'Auth service unavailable' });
   } catch (err) {
     console.error('[authProxy] GET /users/:id error:', err.message);
     res.status(502).json({ success: false, message: 'Auth service unavailable' });

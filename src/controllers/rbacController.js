@@ -14,7 +14,13 @@ exports.getRoles = async (req, res, next) => {
 exports.createRole = async (req, res, next) => {
     try {
         const { orgId } = req.params;
-        const creatorId = req.user?.id;
+        const creatorId =
+            req.user?.id ||
+            req.headers['x-user-id'] ||
+            req.headers['X-User-Id'] ||
+            req.headers['X-User-ID'] ||
+            req.body?.created_by ||
+            null;
         const role = await rbacService.createRole(orgId, req.body, creatorId);
         res.status(201).json({ success: true, data: role });
     } catch (error) {

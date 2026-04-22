@@ -253,6 +253,107 @@ function forwardAuthHeaders(req) {
   return h;
 }
 
+function textFromExtractedData(raw) {
+  if (!raw) return '';
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (!t) return '';
+    try {
+      parsed = JSON.parse(t);
+    } catch (_) {
+      return t;
+    }
+  }
+
+  if (typeof parsed === 'string') return parsed.trim();
+  if (!parsed || typeof parsed !== 'object') return '';
+  if (typeof parsed.text === 'string' && parsed.text.trim().length >= 20) return parsed.text.trim();
+  if (typeof parsed.fullText === 'string' && parsed.fullText.trim().length >= 20) return parsed.fullText.trim();
+  if (typeof parsed.raw_text === 'string' && parsed.raw_text.trim().length >= 20) return parsed.raw_text.trim();
+  if (Array.isArray(parsed.keywords) && parsed.keywords.length) {
+    return parsed.keywords.map((k) => (typeof k === 'string' ? k : String(k))).join(', ');
+  }
+  return '';
+}
+
+async function resolveScoreInput(tenantDb, positionId, candidateId, resumeTextOverride) {
+  let jobDescriptionText = '';
+  let resumeText = (resumeTextOverride || '').trim();
+  let minExperience = null;
+  let maxExperience = null;
+
+  try {
+    const jdRows = await db.query(
+      `SELECT extracted_data FROM \`${tenantDb}\`.jd_extract WHERE position_id = ? OR LOWER(REPLACE(position_id, '-', '')) = LOWER(REPLACE(?, '-', '')) LIMIT 1`,
+      [positionId, positionId]
+    );
+    jobDescriptionText = textFromExtractedData(jdRows?.[0]?.extracted_data);
+  } catch (_) {}
+
+  try {
+    const posRows = await db.query(
+      `SELECT title, minimum_experience AS minExperience, maximum_experience AS maxExperience, job_description AS jobDescription
+       FROM \`${tenantDb}\`.positions
+       WHERE id = UNHEX(REPLACE(?,'-','')) OR BIN_TO_UUID(id) = ? LIMIT 1`,
+      [positionId, positionId]
+    );
+    const pos = posRows?.[0];
+    if (pos) {
+      if (!jobDescriptionText && pos.jobDescription) jobDescriptionText = String(pos.jobDescription).trim();
+      if (!jobDescriptionText && pos.title) jobDescriptionText = `Role: ${pos.title}. Position requirements and responsibilities.`;
+      if (pos.minExperience != null && !Number.isNaN(Number(pos.minExperience))) minExperience = Number(pos.minExperience);
+      if (pos.maxExperience != null && !Number.isNaN(Number(pos.maxExperience))) maxExperience = Number(pos.maxExperience);
+    }
+  } catch (_) {}
+
+  if (!resumeText || resumeText.length < 50) {
+    try {
+      const rowScoped = await db.query(
+        `SELECT extracted_data FROM \`${tenantDb}\`.resume_extract WHERE (candidate_id = ? OR LOWER(REPLACE(candidate_id, '-', '')) = LOWER(REPLACE(?, '-', ''))) AND (position_id = ? OR LOWER(REPLACE(position_id, '-', '')) = LOWER(REPLACE(?, '-', ''))) LIMIT 1`,
+        [candidateId, candidateId, positionId, positionId]
+      );
+      resumeText = textFromExtractedData(rowScoped?.[0]?.extracted_data) || resumeText;
+    } catch (_) {}
+  }
+
+  if (!resumeText || resumeText.length < 50) {
+    try {
+      const rowGlobal = await db.query(
+        `SELECT extracted_data FROM \`${tenantDb}\`.resume_extract WHERE (candidate_id = ? OR LOWER(REPLACE(candidate_id, '-', '')) = LOWER(REPLACE(?, '-', ''))) LIMIT 1`,
+        [candidateId, candidateId]
+      );
+      const fallbackText = textFromExtractedData(rowGlobal?.[0]?.extracted_data);
+      if (fallbackText.length > resumeText.length) resumeText = fallbackText;
+    } catch (_) {}
+  }
+
+  return {
+    jobDescriptionText: jobDescriptionText || '',
+    resumeText: resumeText || '',
+    minExperience,
+    maxExperience
+  };
+}
+
+async function handleScoreInput(req, res) {
+  try {
+    const { positionId, candidateId, resumeText } = req.body || {};
+    if (!positionId || !candidateId) {
+      return res.status(400).json({ success: false, message: 'positionId and candidateId are required' });
+    }
+    if (!req.tenantDb) {
+      return res.status(400).json({ success: false, message: 'Tenant database not resolved' });
+    }
+
+    const input = await resolveScoreInput(req.tenantDb, positionId, candidateId, resumeText);
+    return res.status(200).json({ success: true, data: input });
+  } catch (error) {
+    console.error('score-input error:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Failed to resolve score input' });
+  }
+}
+
 /**
  * POST /position-candidates/score-resume
  * Body: { positionCandidateId, candidateId, positionId }
@@ -279,48 +380,53 @@ async function handleScoreResume(req, res) {
       });
     }
 
-    let scoreResponse;
-    try {
-      const httpsAgent = buildHttpsAgent(streamingUrl);
-      scoreResponse = await axios.post(
-        `${streamingUrl}/resume-ats/score`,
-        {
-          positionId,
-          candidateId,
-          positionCandidateId,
-          tenantId: req.tenantDb,
-          resumeText: req.body.resumeText || undefined
-        },
-        { timeout: 60000, headers: { 'Content-Type': 'application/json' }, httpsAgent }
-      );
-    } catch (e) {
-      const status = e.response?.status || 502;
-      let msg = e.response?.data?.detail ?? e.response?.data?.message ?? e.message;
-      if (typeof msg !== 'string') msg = msg ? JSON.stringify(msg) : 'Streaming resume-score API unavailable';
+    let scoreResponse = { data: { categoryScores: req.body.categoryScores || {} } };
+    let overallScore = req.body.overallScore;
 
-      // Graceful degradation: if resume is too short or AI service is down, don't block candidate addition.
-      if (status === 400 && msg.includes('too short')) {
-        console.warn('[handleScoreResume] Scoring skipped: resume text too short for AI analysis.');
-        return res.status(200).json({
-          success: true,
-          data: {
-            recommendationStatus: 'INVITED',
-            warning: 'Resume text too short for AI analysis. Scoring skipped.',
-            overallScore: 0
-          }
+    if (overallScore == null || Number.isNaN(Number(overallScore))) {
+      try {
+        const httpsAgent = buildHttpsAgent(streamingUrl);
+        scoreResponse = await axios.post(
+          `${streamingUrl}/resume-ats/score`,
+          {
+            positionId,
+            candidateId,
+            positionCandidateId,
+            tenantId: req.tenantDb,
+            resumeText: req.body.resumeText || undefined
+          },
+          { timeout: 60000, headers: { 'Content-Type': 'application/json' }, httpsAgent }
+        );
+      } catch (e) {
+        const status = e.response?.status || 502;
+        let msg = e.response?.data?.detail ?? e.response?.data?.message ?? e.message;
+        if (typeof msg !== 'string') msg = msg ? JSON.stringify(msg) : 'Streaming resume-score API unavailable';
+
+        if (status === 400 && msg.includes('too short')) {
+          console.warn('[handleScoreResume] Scoring skipped: resume text too short for AI analysis.');
+          return res.status(200).json({
+            success: true,
+            data: {
+              recommendationStatus: 'INVITED',
+              warning: 'Resume text too short for AI analysis. Scoring skipped.',
+              overallScore: 0
+            }
+          });
+        }
+
+        console.error('[handleScoreResume] Streaming error:', msg);
+        return res.status(status === 400 ? 200 : status).json({
+          success: status === 400,
+          message: msg,
+          warning: status === 400 ? 'AI scoring unavailable for this resume variant.' : undefined,
+          data: status === 400 ? { recommendationStatus: 'INVITED', overallScore: 0 } : undefined
         });
       }
-
-      console.error('[handleScoreResume] Streaming error:', msg);
-      return res.status(status === 400 ? 200 : status).json({
-        success: status === 400, // Return success if it's a client usage error (like length)
-        message: msg,
-        warning: status === 400 ? 'AI scoring unavailable for this resume variant.' : undefined,
-        data: status === 400 ? { recommendationStatus: 'INVITED', overallScore: 0 } : undefined
-      });
+      overallScore = scoreResponse.data?.overallScore ?? null;
+    } else {
+      overallScore = Number(overallScore);
     }
 
-    const overallScore = scoreResponse.data?.overallScore ?? null;
     if (overallScore == null) {
       return res.status(502).json({ success: false, message: 'Invalid score response from Streaming' });
     }
@@ -341,7 +447,7 @@ async function handleScoreResume(req, res) {
 
     const organizationId = bodyOrgId || req.user?.organizationId || req.user?.organization_id;
     let recommendationStatus = 'INVITED';
-    let inviteMeta = { emailSent: false, linkReused: false };
+    let inviteMeta = { emailSent: false, linkReused: false, warning: null };
     try {
       const aiSettings = organizationId
         ? await adminService.getAiScoringSettings(req.tenantDb, organizationId)
@@ -440,9 +546,11 @@ async function handleScoreResume(req, res) {
 
         const emailResult = await emailService.sendEmail(candidateEmail, inviteSubject, inviteBody);
         if (!emailResult || !emailResult.sent) {
+          const emailError = emailResult?.error || 'Unknown email error';
+          console.error('[position-candidates/finalize-resume-score] invite email not sent:', emailError);
           return res.status(500).json({
             success: false,
-            message: `Invitation email not delivered: ${emailResult?.error || 'Unknown email error'}`
+            message: `Invitation email not delivered: ${emailError}`
           });
         }
         inviteMeta.emailSent = true;
@@ -519,6 +627,8 @@ async function handleScoreResume(req, res) {
 }
 
 router.post('/score-resume', authMiddleware, tenantMiddleware, handleScoreResume);
+router.post('/score-input', authMiddleware, tenantMiddleware, handleScoreInput);
+router.post('/finalize-resume-score', authMiddleware, tenantMiddleware, handleScoreResume);
 
 /**
  * POST /position-candidates/manual-invite

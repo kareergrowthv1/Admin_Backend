@@ -234,67 +234,67 @@ class CandidateModel {
 
     const sourceDb = await CandidateModel.resolveProfileDb(database, organizationId);
 
-    let query = `SELECT * FROM ${sourceDb}.college_candidates WHERE organization_id = ?`;
+    let query = `SELECT cc.*, cb.start_year AS batch_start_year, cb.end_year AS batch_end_year FROM ${sourceDb}.college_candidates cc LEFT JOIN ${sourceDb}.college_branches cb ON cb.id = cc.branch_id WHERE cc.organization_id = ?`;
     const params = [organizationId];
 
     // Status filter
     if (status) {
-      query += ` AND status = ?`;
+      query += ` AND cc.status = ?`;
       params.push(status);
     } else if (statuses && statuses.length > 0) {
       const placeholders = statuses.map(() => '?').join(',');
-      query += ` AND status IN (${placeholders})`;
+      query += ` AND cc.status IN (${placeholders})`;
       params.push(...statuses);
     }
 
     // Created by filter
     if (createdBy) {
-      query += ` AND candidate_created_by = ?`;
+      query += ` AND cc.candidate_created_by = ?`;
       params.push(createdBy);
     }
 
     // Search filter (name, email, code)
     if (searchTerm) {
-      query += ` AND (candidate_name LIKE ? OR email LIKE ? OR candidate_code LIKE ? OR register_no LIKE ?)`;
+      query += ` AND (cc.candidate_name LIKE ? OR cc.email LIKE ? OR cc.candidate_code LIKE ? OR cc.register_no LIKE ?)`;
       const searchPattern = `%${searchTerm}%`;
       params.push(searchPattern, searchPattern, searchPattern, searchPattern);
     }
 
     // Date range filter
     if (dateFrom) {
-      query += ` AND created_at >= ?`;
+      query += ` AND cc.created_at >= ?`;
       params.push(dateFrom);
     }
     if (dateTo) {
-      query += ` AND created_at <= ?`;
+      query += ` AND cc.created_at <= ?`;
       params.push(dateTo);
     }
 
     // Dept filter (multi-select)
     if (deptIds && deptIds.length > 0) {
       const placeholders = deptIds.map(() => '?').join(',');
-      query += ` AND dept_id IN (${placeholders})`;
+      query += ` AND cc.dept_id IN (${placeholders})`;
       params.push(...deptIds);
     }
 
     // Branch filter (multi-select)
     if (branchIds && branchIds.length > 0) {
       const placeholders = branchIds.map(() => '?').join(',');
-      query += ` AND branch_id IN (${placeholders})`;
+      query += ` AND cc.branch_id IN (${placeholders})`;
       params.push(...branchIds);
     }
 
     // Semester filter (multi-select)
     if (semesters && semesters.length > 0) {
       const placeholders = semesters.map(() => '?').join(',');
-      query += ` AND semester IN (${placeholders})`;
+      query += ` AND cc.semester IN (${placeholders})`;
       params.push(...semesters);
     }
 
     // Batch/Year filter (multi-select)
     if (batches && batches.length > 0) {
       const placeholders = batches.map(() => '?').join(',');
-      query += ` AND year_of_passing IN (${placeholders})`;
+      query += ` AND cc.year_of_passing IN (${placeholders})`;
       params.push(...batches);
     }
 
@@ -354,13 +354,13 @@ class CandidateModel {
     }
 
     // Sorting and pagination
-    let finalOrderBy = `${safeSortBy} ${safeSortOrder}`;
+    let finalOrderBy = `cc.${safeSortBy} ${safeSortOrder}`;
     if (sortOrder === 'A-Z') {
-      finalOrderBy = `candidate_name ASC`;
+      finalOrderBy = `cc.candidate_name ASC`;
     } else if (sortOrder === 'NEWEST_TO_OLDEST') {
-      finalOrderBy = `created_at DESC`;
+      finalOrderBy = `cc.created_at DESC`;
     } else if (sortOrder === 'OLDEST_TO_NEWEST') {
-      finalOrderBy = `created_at ASC`;
+      finalOrderBy = `cc.created_at ASC`;
     }
 
     query += ` ORDER BY ${finalOrderBy} LIMIT ? OFFSET ?`;
@@ -440,7 +440,7 @@ class CandidateModel {
       statuses = [],
       searchTerm,
       createdBy,
-      sortBy = 'created_at',
+      sortBy = 'updated_at',
       sortOrder = 'DESC',
       dateFrom,
       dateTo
@@ -459,7 +459,7 @@ class CandidateModel {
     const useAtsCandidates = existingTables.includes('ats_candidates');
 
     const safeSortOrder = (sortOrder || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
-    const safeSortBy = sortBy || 'created_at';
+    const safeSortBy = sortBy || 'updated_at';
 
     let results = { data: [], pagination: { page, pageSize, total: 0 } };
     let totalElements = 0;
@@ -553,8 +553,8 @@ class CandidateModel {
     
     // Sort the combined results in JS
     finalData.sort((a, b) => {
-      const dateA = new Date(a.candidateCreatedAt || a.createdAt || 0);
-      const dateB = new Date(b.candidateCreatedAt || b.createdAt || 0);
+      const dateA = new Date(a.updatedAt || a.updated_at || a.candidateCreatedAt || a.createdAt || 0);
+      const dateB = new Date(b.updatedAt || b.updated_at || b.candidateCreatedAt || b.createdAt || 0);
       return safeSortOrder === 'DESC' ? dateB - dateA : dateA - dateB;
     });
 
@@ -777,6 +777,22 @@ class CandidateModel {
     const countRes = await db.query(countQuery, params);
     const totalElements = countRes[0]?.total || 0;
 
+    const sortFieldMapping = {
+      'created_at': 'ac.created_at',
+      'candidateCreatedAt': 'ac.created_at',
+      'updated_at': 'ac.updated_at',
+      'updatedAt': 'ac.updated_at',
+      'candidate_name': 'ac.name',
+      'candidateName': 'ac.name',
+      'candidate_code': 'ac.candidate_code',
+      'candidateCode': 'ac.candidate_code',
+      'status': 'ac.stage',
+      'recommendationStatus': 'ac.stage',
+      'resume_score': 'ac.resume_score',
+      'resumeMatchScore': 'ac.resume_score'
+    };
+    const safeSortBy = sortFieldMapping[sortBy] || 'ac.updated_at';
+
     const selectQuery = `
       SELECT 
         LOWER(BIN_TO_UUID(ac.id)) as positionCandidateId,
@@ -805,11 +821,11 @@ class CandidateModel {
         NULL as questionSetCode,
         NULL as questionSetTitle,
         NULL as candidateCreatedBy,
-        ac.created_at as updatedAt
+        ac.updated_at as updatedAt
       FROM \`${tenantDb}\`.ats_candidates ac
       LEFT JOIN \`${tenantDb}\`.jobs j ON ac.job_id = j.id
       ${whereClause.replace(/organization_id/g, 'ac.organization_id').replace(/name/g, 'ac.name').replace(/email/g, 'ac.email').replace(/candidate_code/g, 'ac.candidate_code').replace(/job_id/g, 'ac.job_id')}
-      ORDER BY ac.created_at ${sortOrder}
+      ORDER BY ${safeSortBy} ${sortOrder}
       LIMIT ? OFFSET ?
     `;
 
@@ -849,7 +865,7 @@ class CandidateModel {
       'resume_score': 'jc.resume_match_score',
       'resumeMatchScore': 'jc.resume_match_score'
     };
-    const safeSortBy = sortFieldMapping[sortBy] || 'jc.created_at';
+    const safeSortBy = sortFieldMapping[sortBy] || 'jc.updated_at';
 
     let baseWhere = hasCandidatesTable ? 'WHERE (tc.organization_id = ? OR cc.organization_id = ?)' : 'WHERE cc.organization_id = ?';
     const baseParams = [organizationId];
@@ -932,7 +948,7 @@ class CandidateModel {
         qs.question_set_code as questionSetCode,
         qs.question_set_title as questionSetTitle,
         LOWER(BIN_TO_UUID(jc.interview_scheduled_by)) as candidateCreatedBy,
-        jc.created_at as updatedAt
+        jc.updated_at as updatedAt
       FROM \`${tenantDb}\`.job_candidates jc
       LEFT JOIN \`${tenantDb}\`.jobs j ON j.id = jc.job_id
       LEFT JOIN \`${tenantDb}\`.question_sets qs ON qs.id = jc.question_set_id
@@ -997,7 +1013,7 @@ class CandidateModel {
       'resume_score': 'pc.resume_match_score',
       'resumeMatchScore': 'pc.resume_match_score'
     };
-    const safeSortBy = sortFieldMapping[sortBy] || 'pc.created_at';
+    const safeSortBy = sortFieldMapping[sortBy] || 'pc.updated_at';
 
     let baseWhere = hasCandidatesTable ? 'WHERE cc.organization_id = ?' : 'WHERE c.organization_id = ?';
     const baseParams = [organizationId];
@@ -1084,7 +1100,7 @@ class CandidateModel {
         qs.question_set_code as questionSetCode,
         qs.question_set_title as questionSetTitle,
         LOWER(BIN_TO_UUID(pc.interview_scheduled_by)) as candidateCreatedBy,
-        pc.created_at as updatedAt,
+        pc.updated_at as updatedAt,
         pl.verification_code as verificationCode
       FROM \`${tenantDb}\`.position_candidates pc
       LEFT JOIN \`${tenantDb}\`.positions p ON p.id = pc.position_id
@@ -1161,7 +1177,7 @@ class CandidateModel {
       'resume_score': 'cp.resume_score',
       'resumeMatchScore': 'cp.resume_score'
     };
-    const safeSortBy = sortFieldMapping[sortBy] || 'cp.created_at';
+    const safeSortBy = sortFieldMapping[sortBy] || 'cp.updated_at';
 
     let baseWhere = 'WHERE cp.organization_id = ?';
     const baseParams = [organizationId];
@@ -3092,12 +3108,13 @@ class CandidateModel {
                 cp.invited_date AS linkActiveAt, cp.link_expires_at AS linkExpiresAt,
                 cp.resume_score AS resumeMatchScore, COALESCE(cp.recommendation_status, cp.status) AS recommendationStatus,
                 cp.created_at AS createdAt,
-                p.title AS positionTitleFromPos, p.code AS positionCodeFromPos,
+                p.title AS positionTitleFromPos, p.code AS positionCodeFromPos, p.status AS positionStatus,
                 qs.question_set_code AS questionSetCode, qs.question_set_code AS questionSetTitle
          FROM \`${tenantDb}\`.candidate_positions cp
          LEFT JOIN \`${tenantDb}\`.positions p ON (p.id = UNHEX(REPLACE(LOWER(TRIM(cp.position_id)), '-', '')) OR BIN_TO_UUID(p.id) = cp.position_id)
          LEFT JOIN \`${tenantDb}\`.question_sets qs ON (qs.id = UNHEX(REPLACE(LOWER(TRIM(cp.question_set_id)), '-', '')) OR BIN_TO_UUID(qs.id) = cp.question_set_id)
          WHERE (LOWER(TRIM(cp.candidate_id)) = LOWER(?) OR REPLACE(cp.candidate_id, '-', '') = ?) AND cp.organization_id = ?
+           AND UPPER(COALESCE(p.status, '')) = 'ACTIVE'
          ORDER BY cp.created_at DESC`,
         [candidateId, cId, organizationId]
       );
@@ -3108,6 +3125,7 @@ class CandidateModel {
         positionId: r.positionId,
         positionTitle: r.positionTitleFromPos || r.positionTitle || '—',
         positionCode: r.positionCodeFromPos || r.positionCode || '—',
+        positionStatus: r.positionStatus,
         domainType: r.domainType,
         questionSetId: r.questionSetId,
         questionSetTitle: r.questionSetCode || r.questionSetTitle || '—',
@@ -3124,7 +3142,7 @@ class CandidateModel {
       if (!hexCandidate) return [];
       const rows = await db.query(
         `SELECT HEX(pc.id) AS positionCandidateId, HEX(pc.candidate_id) AS candidateId, HEX(pc.position_id) AS positionId,
-                p.title AS positionTitle, p.code AS positionCode,
+                p.title AS positionTitle, p.code AS positionCode, p.status AS positionStatus,
                 HEX(pc.question_set_id) AS questionSetId,
                 DATE_FORMAT(pc.link_active_at, '%Y-%m-%dT%H:%i:%s.000Z') AS linkActiveAt,
                 DATE_FORMAT(pc.link_expires_at, '%Y-%m-%dT%H:%i:%s.000Z') AS linkExpiresAt,
@@ -3133,6 +3151,7 @@ class CandidateModel {
          FROM \`${tenantDb}\`.position_candidates pc
          LEFT JOIN \`${tenantDb}\`.positions p ON p.id = pc.position_id
          WHERE pc.candidate_id = UNHEX(?)
+           AND UPPER(COALESCE(p.status, '')) = 'ACTIVE'
          ORDER BY pc.created_at DESC`,
         [hexCandidate]
       );
@@ -3143,6 +3162,7 @@ class CandidateModel {
         positionId: r.positionId?.toLowerCase?.()?.replace(/(\w{8})(\w{4})(\w{4})(\w{4})(\w{12})/, '$1-$2-$3-$4-$5') || r.positionId,
         positionTitle: r.positionTitle || '—',
         positionCode: r.positionCode || '—',
+        positionStatus: r.positionStatus,
         questionSetId: r.questionSetId,
         questionSetTitle: '—',
         questionSetDuration: null,

@@ -21,6 +21,36 @@ const tasksRoutes = require('./routes/tasks');
 
 const app = express();
 
+const MYSQL_DATETIME_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{1,6})?$/;
+const TIMESTAMP_KEYS = new Set(['createdAt', 'updatedAt', 'created_at', 'updated_at']);
+
+function normalizeApiTimestamps(value, parentKey = '') {
+  if (value == null) return value;
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeApiTimestamps(item));
+  }
+
+  if (typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = normalizeApiTimestamps(v, k);
+    }
+    return out;
+  }
+
+  if (typeof value === 'string' && TIMESTAMP_KEYS.has(parentKey) && MYSQL_DATETIME_RE.test(value)) {
+    // Normalize MySQL datetime text to explicit UTC ISO string.
+    return `${value.replace(' ', 'T')}Z`;
+  }
+
+  return value;
+}
+
 // CORS: from .env (comma-separated CORS_ORIGINS); fallback for dev when empty
 const DEFAULT_CORS_ORIGINS = [
   'http://localhost:4000', 'http://localhost:4001', 'http://localhost:4002', 'http://localhost:4003',
@@ -73,6 +103,13 @@ app.use(cors({
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(cookieParser());
+
+// Ensure consistent timestamp serialization for all API responses.
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (payload) => originalJson(normalizeApiTimestamps(payload));
+  next();
+});
 
 // Swagger Documentation
 const swaggerUiOptions = {
