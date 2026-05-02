@@ -10,8 +10,15 @@ const rbacMiddleware = (featureKey) => {
             const { roleId, id: userId, role: roleName } = req.user;
 
             // 1. Check for known Administrator roles (hardcoded bypass for speed & reliability)
-            // ROLE0003 is the code for Administrator in some tenants.
-            if (roleName === 'Super Administrator' || roleName === 'Administrator' || roleName === 'ADMIN' || roleName === 'ROLE0003') {
+            const upperRole = (roleName || '').toUpperCase().trim();
+            if (
+                upperRole === 'SUPER ADMINISTRATOR' || 
+                upperRole === 'ADMINISTRATOR' || 
+                upperRole === 'ADMIN' || 
+                upperRole === 'ROLE0003' ||
+                upperRole === 'COLLEGE_ADMIN' ||
+                upperRole.includes('SUPERADMIN')
+            ) {
                 req.user.dataScope = 'ALL';
                 return next();
             }
