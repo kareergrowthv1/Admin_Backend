@@ -151,15 +151,29 @@ const startServer = async () => {
     }
 
     const scheduler = require('./utils/scheduler');
-
-    app.listen(config.port, () => {
-        console.log(`Admin Backend running on port ${config.port}`);
-        // Start scheduled tasks
+    let schedulerStarted = false;
+    const startSchedulersOnce = () => {
+        if (schedulerStarted) return;
+        schedulerStarted = true;
+        // Start scheduled tasks once regardless of which listener (HTTP/HTTPS) succeeds first.
         scheduler.startPositionExpiryJob();
         scheduler.startLinkExpiryJob();
-        
-        // Run once on startup to process any links that expired while server was down
+        // Run once on startup to process any links that expired while server was down.
         scheduler.runLinkExpiryNow();
+    };
+
+    const httpServer = app.listen(config.port, () => {
+        console.log(`Admin Backend running on port ${config.port}`);
+        startSchedulersOnce();
+    });
+
+    httpServer.on('error', (err) => {
+        if (err && err.code === 'EADDRINUSE') {
+            console.warn(`[Startup] HTTP port ${config.port} already in use. Skipping HTTP listener.`);
+            startSchedulersOnce();
+            return;
+        }
+        throw err;
     });
 
     // Optional HTTPS listener for LAN sharing / secure browser access.
@@ -171,8 +185,18 @@ const startServer = async () => {
             key: fs.readFileSync(sslKeyPath),
             cert: fs.readFileSync(sslCertPath),
         };
-        https.createServer(tlsOptions, app).listen(sslPort, '0.0.0.0', () => {
+        const httpsServer = https.createServer(tlsOptions, app);
+        httpsServer.listen(sslPort, '0.0.0.0', () => {
             console.log(`Admin Backend HTTPS running on port ${sslPort}`);
+            startSchedulersOnce();
+        });
+        httpsServer.on('error', (err) => {
+            if (err && err.code === 'EADDRINUSE') {
+                console.warn(`[Startup] HTTPS port ${sslPort} already in use. Skipping HTTPS listener.`);
+                startSchedulersOnce();
+                return;
+            }
+            throw err;
         });
     }
 };

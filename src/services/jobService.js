@@ -386,6 +386,30 @@ const getJobs = async (tenantDb, filters = {}) => {
     const countResult = await db.query(countQuery, params);
     const totalElements = countResult[0]?.total || 0;
 
+    // Candidate mapping table differs across some tenants.
+    // Prefer candidates_job, then fallback to candidates_applied, else return 0 counts.
+    let candidateTable = null;
+    try {
+        const tableRows = await db.query(
+            `SELECT TABLE_NAME
+             FROM INFORMATION_SCHEMA.TABLES
+             WHERE TABLE_SCHEMA = ?
+               AND TABLE_NAME IN ('candidates_job', 'candidates_applied')`,
+            [tenantDb]
+        );
+        const tableNames = new Set((tableRows || []).map(r => r.TABLE_NAME || r.table_name));
+        if (tableNames.has('candidates_job')) candidateTable = 'candidates_job';
+        else if (tableNames.has('candidates_applied')) candidateTable = 'candidates_applied';
+    } catch (e) {
+        console.warn(`[JobService] Unable to detect candidate mapping table for ${tenantDb}:`, e.message);
+    }
+
+    const candidateCountsSelect = candidateTable
+        ? `(SELECT COUNT(*) FROM \`${tenantDb}\`.\`${candidateTable}\` WHERE job_id = j.id) as totalCandidates,
+           (SELECT COUNT(*) FROM \`${tenantDb}\`.\`${candidateTable}\` WHERE job_id = j.id AND source = 'RESUME') as resumeCandidates`
+        : `0 as totalCandidates,
+           0 as resumeCandidates`;
+
     let query = `
         SELECT 
             HEX(j.id) as id, j.code, j.job_title as jobTitle, j.job_role as jobRole,
@@ -399,8 +423,7 @@ const getJobs = async (tenantDb, filters = {}) => {
             j.created_at as createdAt,
             HEX(j.client_id) as clientId,
             c.client_name as clientName,
-            (SELECT COUNT(*) FROM \`${tenantDb}\`.candidates_job WHERE job_id = j.id) as totalCandidates,
-            (SELECT COUNT(*) FROM \`${tenantDb}\`.candidates_job WHERE job_id = j.id AND source = 'RESUME') as resumeCandidates
+            ${candidateCountsSelect}
         FROM \`${tenantDb}\`.jobs j
         LEFT JOIN \`${tenantDb}\`.clients c ON j.client_id = c.id
         LEFT JOIN auth_db.users u ON j.spoc_id = u.id

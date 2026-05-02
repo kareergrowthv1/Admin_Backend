@@ -18,6 +18,44 @@ const dashboardController = require('../controllers/dashboardController');
 const emailTemplateController = require('../controllers/emailTemplateController');
 const jobController = require('../controllers/jobController');
 const clientController = require('../controllers/clientController');
+const { getGoogleMeetConfig, saveGoogleMeetConfig } = require('../services/googleMeetService');
+
+const isAtsAdminUser = (user = {}) => {
+    const roleCode = String(user.roleCode || user.role_code || user.role || '').toUpperCase();
+    const roleName = String(user.roleName || user.role_name || '').toUpperCase();
+    const isCollege = user.isCollege === true || user.is_college === true;
+    const permissions = Array.isArray(user.permissions) ? user.permissions : [];
+    const hasAtsRole = roleCode.includes('ATS') || roleCode.includes('RECRUITER') || roleName.includes('ATS') || roleName.includes('RECRUITER');
+    const hasAtsPermissions = permissions.some((p) => {
+        const featureKey = String(p?.featureKey || p?.feature || p?.key || '').toLowerCase();
+        return featureKey === 'jobs' || featureKey === 'clients' || featureKey === 'candidates';
+    });
+
+    // RBAC already checks `settings` access for this route.
+    // This additional guard should only ensure ATS context (not college) and avoid over-strict admin-flag checks.
+    return !isCollege && (hasAtsRole || hasAtsPermissions);
+};
+
+const pickAdminGoogleMeetSettings = (settings = {}) => ({
+    enabled: settings?.enabled === true,
+    defaultOwnerEmails: Array.isArray(settings?.defaultOwnerEmails)
+        ? settings.defaultOwnerEmails.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)
+        : [],
+    panelMembers: Array.isArray(settings?.panelMembers)
+        ? settings.panelMembers
+            .map((member) => ({
+                name: String(member?.name || '').trim(),
+                email: String(member?.email || '').trim().toLowerCase(),
+                role: String(member?.role || '').trim(),
+                skills: String(member?.skills || '').trim(),
+                experience: String(member?.experience || '').trim(),
+                isPrimary: member?.isPrimary === true
+            }))
+            .filter((member) => member.email)
+        : [],
+    includeLoggedInUser: settings?.includeLoggedInUser === true,
+    notifyPanelSelection: settings?.notifyPanelSelection !== false
+});
 
 // RBAC Routes
 router.get('/organizations/:orgId/roles', authMiddleware, tenantMiddleware, rbacMiddleware('roles'), rbacController.getRoles);
@@ -122,6 +160,49 @@ router.put('/ai-scoring-settings/:organizationId', authMiddleware, tenantMiddlew
 router.get('/cross-question-settings/:organizationId', authMiddleware, tenantMiddleware, adminController.getCrossQuestionSettings);
 router.put('/cross-question-settings/:organizationId', authMiddleware, tenantMiddleware, adminController.updateCrossQuestionSettings);
 
+// ATS Admin Settings: Google Meet Integration
+router.get('/settings/google-meet', authMiddleware, tenantMiddleware, rbacMiddleware('settings'), async (req, res) => {
+    try {
+        if (!isAtsAdminUser(req.user || {})) {
+            return res.status(403).json({ success: false, message: 'Only ATS Admin can access Google Meet settings' });
+        }
+        const authContext = {
+            authorization: req.headers.authorization || '',
+            cookie: req.headers.cookie || ''
+        };
+        const data = await getGoogleMeetConfig(authContext);
+        return res.status(200).json({
+            success: true,
+            data: pickAdminGoogleMeetSettings(data || {})
+        });
+    } catch (error) {
+        console.error('Failed to fetch Google Meet settings:', error);
+        return res.status(500).json({ success: false, message: 'Failed to fetch Google Meet settings' });
+    }
+});
+
+router.put('/settings/google-meet', authMiddleware, tenantMiddleware, rbacMiddleware('settings'), async (req, res) => {
+    try {
+        if (!isAtsAdminUser(req.user || {})) {
+            return res.status(403).json({ success: false, message: 'Only ATS Admin can update Google Meet settings' });
+        }
+        const adminPayload = pickAdminGoogleMeetSettings(req.body || {});
+        const authContext = {
+            authorization: req.headers.authorization || '',
+            cookie: req.headers.cookie || ''
+        };
+        const saved = await saveGoogleMeetConfig(adminPayload, authContext);
+        return res.status(200).json({
+            success: true,
+            message: 'Google Meet settings saved',
+            data: pickAdminGoogleMeetSettings(saved || {})
+        });
+    } catch (error) {
+        console.error('Failed to save Google Meet settings:', error);
+        return res.status(500).json({ success: false, message: error.message || 'Failed to save Google Meet settings' });
+    }
+});
+
 // Position routes (Require tenant context)
 // Optional multer: only parse file when Content-Type is multipart (create-with-JD flow)
 const multer = require('multer');
@@ -175,6 +256,7 @@ router.delete('/ats-candidates/:candidateId', authMiddleware, tenantMiddleware, 
 router.post('/ats-candidates/:candidateId/resend-invitation', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.resendInvitation);
 router.post('/ats-candidates/:candidateId/setup-assessment', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.setupAssessment);
 router.get('/ats-job-stages', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.getJobStages);
+router.post('/ats-job-stages', authMiddleware, tenantMiddleware, rbacMiddleware('candidates'), atsCandidateController.createJobStage);
 router.post('/ats-candidates/upload', authMiddleware, tenantMiddleware, uploadMemory.single('file'), atsCandidateController.uploadAndExtractResume);
 
 // Question Set routes

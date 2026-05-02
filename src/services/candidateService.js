@@ -1281,7 +1281,13 @@ class CandidateService {
           candidateName,
           companyName: finalData.company_name || 'College',
           organizationId,
-          positionName
+          positionName,
+          createdByEmail: finalData.createdByEmail || finalData.created_by_email || finalData.schedulerEmail || null,
+          loggedInUserEmail: finalData.loggedInUserEmail || null,
+          panelSelection: finalData.panelSelection || finalData.panel_selection || null,
+          panelMembers: finalData.panelMembers || finalData.panel_members || null,
+          panelUsers: finalData.panelUsers || finalData.panel_users || null,
+          interviewerEmails: finalData.interviewerEmails || finalData.interviewer_emails || null
         };
         await AiAssistantService.scheduleInterview(scheduleData);
       } catch (schedError) {

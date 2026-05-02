@@ -65,9 +65,10 @@ const getEmailConfig = async () => {
  * @param {string} htmlBody - HTML body
  * @param {string} [cc] - CC email addresses (comma separated)
  * @param {Array<{content: string, name: string, mime_type: string}>} [attachments] - Base64 attachments
+ * @param {{ textBody?: string }} [options] - Optional plain-text body support
  * @returns {Promise<{ sent: boolean, error?: string }>}
  */
-const sendEmail = async (to, subject, htmlBody, cc, attachments) => {
+const sendEmail = async (to, subject, htmlBody, cc, attachments, options = {}) => {
     const emailConfig = await getEmailConfig();
     if (!emailConfig || !emailConfig.enabled) {
         return { sent: false, error: 'Email not enabled or config unavailable' };
@@ -86,6 +87,14 @@ const sendEmail = async (to, subject, htmlBody, cc, attachments) => {
         subject,
         htmlbody: htmlBody || ''
     };
+
+    const textBody = String(options?.textBody || '').trim();
+    if (textBody) {
+        payload.textbody = textBody;
+        if (!payload.htmlbody) {
+            payload.htmlbody = textBody.replace(/\n/g, '<br/>');
+        }
+    }
 
     if (cc) {
         const ccAddresses = cc.split(',').map(email => ({
@@ -115,7 +124,44 @@ const sendEmail = async (to, subject, htmlBody, cc, attachments) => {
         );
         return { sent: true };
     } catch (err) {
-        const msg = err.response?.data?.message || err.response?.data?.error || err.message;
+        const payload = err.response?.data;
+        const normalizedPayload = (
+            payload
+            && typeof payload === 'object'
+            && payload.error
+            && typeof payload.error === 'object'
+        ) ? payload.error : payload;
+        let msg = '';
+
+        if (typeof normalizedPayload?.message === 'string' && normalizedPayload.message.trim()) {
+            msg = normalizedPayload.message.trim();
+        } else if (typeof normalizedPayload?.error === 'string' && normalizedPayload.error.trim()) {
+            msg = normalizedPayload.error.trim();
+        } else if (Array.isArray(normalizedPayload?.details)) {
+            const detailText = normalizedPayload.details
+                .map((item) => {
+                    if (!item) return '';
+                    if (typeof item === 'string') return item.trim();
+                    if (typeof item.message === 'string' && item.message.trim()) return item.message.trim();
+                    if (typeof item.code === 'string' && item.code.trim()) return item.code.trim();
+                    return '';
+                })
+                .filter(Boolean)
+                .join('; ');
+            if (detailText) msg = detailText;
+        }
+
+        if (!msg && normalizedPayload && typeof normalizedPayload === 'object') {
+            try {
+                msg = JSON.stringify(normalizedPayload);
+            } catch (_) {
+                msg = '';
+            }
+        }
+
+        if (!msg) {
+            msg = err.message;
+        }
         console.warn('[emailService] Zepto send failed:', msg);
         return { sent: false, error: msg };
     }

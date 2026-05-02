@@ -363,6 +363,31 @@ exports.getJobStages = async (req, res, next) => {
     }
 };
 
+exports.createJobStage = async (req, res, next) => {
+    try {
+        const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organization_id;
+        if (!organizationId) {
+            return res.status(400).json({ success: false, message: 'organization_id is required' });
+        }
+
+        const title = String(req.body?.title || '').trim();
+        if (!title) {
+            return res.status(400).json({ success: false, message: 'title is required' });
+        }
+
+        const created = await AtsCandidateService.createJobStage(req.tenantDb, organizationId, {
+            title,
+            description: req.body?.description,
+            icon: req.body?.icon,
+            color: req.body?.color
+        });
+
+        return res.status(201).json({ success: true, data: created, message: 'Stage created successfully' });
+    } catch (error) {
+        next(error);
+    }
+};
+
 /**
  * POST /admins/ats-candidates/:candidateId/score-resume
  * Uses the existing Streaming AI /resume-ats/score endpoint to compute ATS resume score.
