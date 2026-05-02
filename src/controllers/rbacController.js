@@ -59,7 +59,7 @@ exports.createUser = async (req, res, next) => {
 exports.updateUser = async (req, res, next) => {
     try {
         const { orgId, userId } = req.params;
-        await rbacService.updateUser(orgId, userId, req.body);
+        await rbacService.updateUser(orgId, userId, req.body, req.user?.id);
         res.status(200).json({ success: true, message: 'User updated successfully' });
     } catch (error) {
         next(error);

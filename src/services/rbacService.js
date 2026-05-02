@@ -7,25 +7,38 @@ const bcrypt = require('bcryptjs');
  */
 class RBACService {
     constructor() {
-        this._rolesCreatedByColumnEnsured = false;
+        this._schemaEnsured = false;
     }
 
-    async ensureRolesCreatedByColumn() {
-        if (this._rolesCreatedByColumnEnsured) return;
+    async ensureSchema() {
+        if (this._schemaEnsured) return;
 
-        const colRows = await db.authQuery(
-            `SELECT COUNT(*) as cnt
-             FROM INFORMATION_SCHEMA.COLUMNS
-             WHERE TABLE_SCHEMA = DATABASE()
-               AND TABLE_NAME = 'roles'
-               AND COLUMN_NAME = 'created_by'`
+        // Ensure roles table has required columns
+        const roleCols = await db.authQuery(
+            `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'roles'`
         );
+        const existingRoleCols = roleCols.map(c => c.COLUMN_NAME.toLowerCase());
 
-        if (!colRows[0] || colRows[0].cnt === 0) {
+        if (!existingRoleCols.includes('created_by')) {
             await db.authQuery('ALTER TABLE roles ADD COLUMN created_by CHAR(36) NULL AFTER organization_id');
         }
+        if (!existingRoleCols.includes('updated_by')) {
+            await db.authQuery('ALTER TABLE roles ADD COLUMN updated_by CHAR(36) NULL AFTER created_by');
+        }
 
-        this._rolesCreatedByColumnEnsured = true;
+        // Ensure users table has required columns
+        const userCols = await db.authQuery(
+            `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`
+        );
+        const existingUserCols = userCols.map(c => c.COLUMN_NAME.toLowerCase());
+
+        if (!existingUserCols.includes('updated_by')) {
+            await db.authQuery('ALTER TABLE users ADD COLUMN updated_by CHAR(36) NULL AFTER created_by');
+        }
+
+        this._schemaEnsured = true;
     }
 
     // Roles
@@ -58,7 +71,7 @@ class RBACService {
         const id = uuidv4();
 
         // Hosted environments can be behind on migrations; ensure this once before inserts.
-        await this.ensureRolesCreatedByColumn();
+        await this.ensureSchema();
 
         // Auto-generate code e.g., ROLE0001
         const latestRoleRows = await db.authQuery(
@@ -158,7 +171,7 @@ class RBACService {
 
         let query = `SELECT u.id, u.email, u.username, u.first_name, u.last_name, u.phone_number, 
                             u.is_active, u.is_admin, u.role_id, r.name as role_name, r.code as role_code,
-                            u.created_at, u.updated_at,
+                            u.created_at, u.updated_at, u.created_by, u.updated_by,
                             ${positionsSubquery} as positions_count,
                             ${candidatesSubquery} as candidates_count,
                             ${studentsSubquery} as students_count,
@@ -203,20 +216,41 @@ class RBACService {
         return { id, organizationId, email, firstName, lastName, roleId };
     }
 
-    async updateUser(organizationId, userId, userData) {
+    async updateUser(organizationId, userId, userData, updaterId = null) {
+        await this.ensureSchema();
         const updates = [];
         const params = [];
 
         for (const [key, value] of Object.entries(userData)) {
-            if (value !== undefined) {
-                // Map camelCase to snake_case if necessary, or just use the keys directly if they match DB
-                const dbKey = key === 'firstName' ? 'first_name' : (key === 'lastName' ? 'last_name' : (key === 'isActive' ? 'is_active' : (key === 'phoneNumber' ? 'phone_number' : key)));
+            if (value !== undefined && value !== null && value !== '') {
+                let dbKey = key;
+                let dbValue = value;
+
+                if (key === 'firstName') dbKey = 'first_name';
+                else if (key === 'lastName') dbKey = 'last_name';
+                else if (key === 'isActive') dbKey = 'is_active';
+                else if (key === 'phoneNumber') dbKey = 'phone_number';
+                else if (key === 'roleId') dbKey = 'role_id';
+                else if (key === 'password') {
+                    dbKey = 'password_hash';
+                    dbValue = await bcrypt.hash(value, 12);
+                } else if (key === 'username') dbKey = 'username';
+                else if (key === 'email') dbKey = 'email';
+                else if (key === 'isAdmin') dbKey = 'is_admin';
+                else if (key === 'client') dbKey = 'client';
+                else continue; // Skip unknown fields to prevent SQL errors
+
                 updates.push(`${dbKey} = ?`);
-                params.push(value);
+                params.push(dbValue);
             }
         }
 
         if (updates.length === 0) return { success: true };
+
+        if (updaterId) {
+            updates.push('updated_by = ?');
+            params.push(updaterId);
+        }
 
         updates.push('updated_at = NOW()');
         params.push(userId, organizationId);
@@ -273,6 +307,7 @@ class RBACService {
     }
 
     async updateRolePermissions(roleId, permissions, metadata = {}, updaterId = null) {
+        await this.ensureSchema();
         // 1. Update Role Metadata if provided
         if (metadata.name || metadata.description || metadata.status) {
             const updates = [];
