@@ -2181,6 +2181,12 @@ class CandidateModel {
           let query = `UPDATE \`${tenantDb}\`.candidate_positions SET status = ?, updated_at = NOW()
              WHERE (position_id = UNHEX(?) OR REPLACE(LOWER(COALESCE(BIN_TO_UUID(position_id), '')), '-', '') = ?)
                AND (candidate_id = UNHEX(?) OR REPLACE(LOWER(COALESCE(BIN_TO_UUID(candidate_id), '')), '-', '') = ?)`;
+          
+          // Special protection for TEST_STARTED: only apply if in an initial state
+          if (newStatus === 'TEST_STARTED') {
+            query += ` AND (status IN ('PENDING', 'INVITED', 'MANUALLY_INVITED', 'LINK_GENERATED') OR status IS NULL OR status = '')`;
+          }
+          
           const params = [newStatus, posHex, posHex, candHex, candHex];
           if (hasQuestionSetColumn && qHex.length === 32) {
             query += ` AND (question_set_id = UNHEX(?) OR REPLACE(LOWER(COALESCE(BIN_TO_UUID(question_set_id), '')), '-', '') = ?)`;
@@ -2190,6 +2196,11 @@ class CandidateModel {
         } else {
           let query = `UPDATE \`${tenantDb}\`.candidate_positions SET status = ?, updated_at = NOW()
              WHERE REPLACE(LOWER(COALESCE(position_id, '')), '-', '') = ? AND REPLACE(LOWER(COALESCE(candidate_id, '')), '-', '') = ?`;
+          
+          if (newStatus === 'TEST_STARTED') {
+            query += ` AND (status IN ('PENDING', 'INVITED', 'MANUALLY_INVITED', 'LINK_GENERATED') OR status IS NULL OR status = '')`;
+          }
+          
           const params = [newStatus, posHex, candHex];
           if (hasQuestionSetColumn && qHex) {
             query += ` AND REPLACE(LOWER(COALESCE(question_set_id, '')), '-', '') = ?`;
