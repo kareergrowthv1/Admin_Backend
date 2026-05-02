@@ -738,26 +738,36 @@ router.post('/manual-invite', authMiddleware, tenantMiddleware, async (req, res)
     const inviteSubject = `You have been manually invited to take the assessment – ${positionDisplayName}`;
     const inviteBody = `<p>Hi ${candidateDisplayName},</p><p>You have been selected to take an assessment for the position: <strong>${positionDisplayName}</strong> at <strong>${resolvedCompanyName}</strong>.</p><p>Your verification code is: <strong>${verificationCode}</strong></p><p>Take your test at: <a href="${testPortalUrl}">${testPortalUrl}</a></p><p>Enter your registered email and this verification code to start the assessment.</p><p>The link is valid for 7 days.</p><p>Best regards,<br/>${resolvedCompanyName} Recruitment Team</p>`;
 
+    let emailSent = false;
+    let emailError = null;
     let emailResult;
     try {
       emailResult = await emailService.sendEmail(candidateEmail, inviteSubject, inviteBody);
+      emailSent = emailResult && emailResult.sent;
+      if (!emailSent) emailError = emailResult?.error || 'Unknown email error';
     } catch (emailErr) {
       console.error('[manual-invite] Email send error:', emailErr.message);
-      return res.status(500).json({ success: false, message: 'Failed to send invitation email. Status not updated. Please check email configuration.' });
+      emailError = emailErr.message;
     }
 
-    if (!emailResult || !emailResult.sent) {
-      return res.status(500).json({ success: false, message: `Email not delivered: ${emailResult?.error || 'Unknown email error'}. Candidate status has NOT been updated.` });
-    }
-
-    // 3. Email sent successfully — now update status
+    // 3. Update status regardless of email success (per user request)
     const statusResult = await CandidateModel.updateRecommendationStatus(req.tenantDb, positionCandidateId, 'MANUALLY_INVITED');
     if (!statusResult.updated) {
-      // Email was sent but status update failed — log and continue
-      console.warn('[manual-invite] Status update failed after email was sent. positionCandidateId:', positionCandidateId);
+      console.warn('[manual-invite] Status update failed. positionCandidateId:', positionCandidateId);
     }
 
-    // 4. Log activity
+    // 4. Return success, but include email status
+    if (!emailSent) {
+      return res.status(200).json({
+        success: true,
+        message: `Candidate status updated to MANUALLY_INVITED, but invitation email could not be delivered: ${emailError}. You can share the code manually.`,
+        verificationCode,
+        link: testPortalUrl,
+        emailSent: false
+      });
+    }
+
+    // 5. Log activity
     try {
         await ActivityLogService.logActivity(req.tenantDb, {
             organizationId: orgId,
@@ -824,6 +834,7 @@ router.post('/manual-invite', authMiddleware, tenantMiddleware, async (req, res)
         recommendationStatus: 'MANUALLY_INVITED',
         linkId,
         verificationCode,
+        link: testPortalUrl,
         reused: linkReused
       }
     });

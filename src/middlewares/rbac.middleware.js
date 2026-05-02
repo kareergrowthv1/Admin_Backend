@@ -33,23 +33,34 @@ const rbacMiddleware = (featureKey) => {
             }
 
             // 3. Final Fallback: Fetch from database
+            // Normalize featureKey to uppercase to match database convention if necessary, 
+            // but the query itself will handle it if collation is default.
             const rows = await db.authQuery(`
-                SELECT rfp.data_scope, rfp.permissions 
+                SELECT rfp.data_scope, rfp.permissions, f.feature_key
                 FROM role_feature_permissions rfp
                 JOIN features f ON rfp.feature_id = f.id
-                WHERE rfp.role_id = ? AND f.feature_key = ?
+                WHERE rfp.role_id = ? AND LOWER(f.feature_key) = LOWER(?)
             `, [roleId, featureKey]);
 
             if (rows.length === 0) {
+                console.log(`[RBAC] No permission row found for role ${roleId} and feature ${featureKey}. Defaulting to OWN scope.`);
                 req.user.dataScope = 'OWN';
                 req.user.dataFilter = { createdBy: userId };
                 return next();
             }
 
-            const { data_scope, permissions } = rows[0];
+            const { data_scope, permissions, feature_key: dbFeatureKey } = rows[0];
             
-            // Check if they even have READ permission
+            // Check if they even have READ permission (bit 1)
             if ((permissions & 1) === 0) {
+                // Special case for dashboard: allow basic access (OWN scope) even if READ bit is 0
+                if (featureKey.toLowerCase() === 'dashboard' || dbFeatureKey.toLowerCase() === 'dashboard') {
+                    console.log(`[RBAC] Dashboard access granted via fallback for user ${userId} (READ bit was 0)`);
+                    req.user.dataScope = 'OWN';
+                    req.user.dataFilter = { createdBy: userId };
+                    return next();
+                }
+                console.warn(`[RBAC] Access denied for user ${userId}, role ${roleId}, feature ${featureKey}. Permissions bitmask: ${permissions}`);
                 return res.status(403).json({ success: false, message: `Access denied to ${featureKey}` });
             }
 
