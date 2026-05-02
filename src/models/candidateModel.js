@@ -2934,11 +2934,20 @@ class CandidateModel {
     }
     const tablesResult = await db.query(
       `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES 
-       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('candidate_positions', 'position_candidates')`,
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('candidate_positions', 'position_candidates', 'candidates_job')`,
       [tenantDb]
     );
     const tables = (tablesResult || []).map(r => r.TABLE_NAME);
     const hexId = (positionCandidateId || '').replace(/-/g, '');
+
+    if (tables.includes('candidates_job') && hexId.length === 32) {
+      const result = await db.query(
+        `UPDATE \`${tenantDb}\`.candidates_job SET recommendation = ? WHERE id = UNHEX(?)`,
+        [recommendationStatus, hexId]
+      );
+      if (result && result.affectedRows > 0) return { updated: true, table: 'candidates_job' };
+    }
+
     if (tables.includes('candidate_positions')) {
       const statusDisplay = recommendationStatus === 'INVITED' ? 'Invited' : recommendationStatus === 'MANUALLY_INVITED' ? 'MANUALLY_INVITED' : recommendationStatus;
       const result = await db.query(
@@ -2967,6 +2976,41 @@ class CandidateModel {
       [tenantDb]
     );
     const tables = (tablesResult || []).map(r => r.TABLE_NAME);
+    const fmt = (id) => (id && String(id).replace(/-/g, '').length === 32 ? (String(id).length === 32 ? id.replace(/(\w{8})(\w{4})(\w{4})(\w{4})(\w{12})/, '$1-$2-$3-$4-$5') : id) : id);
+    const hexFmt = (h) => (h && h.length === 32 ? h.toLowerCase().replace(/(\w{8})(\w{4})(\w{4})(\w{4})(\w{12})/, '$1-$2-$3-$4-$5') : h);
+
+    if (tables.includes('candidates_job') && hexId.length === 32) {
+      const rows = await db.query(
+        `SELECT 
+          LOWER(BIN_TO_UUID(cj.id)) as positionCandidateId, 
+          LOWER(BIN_TO_UUID(cj.candidate_id)) as candidateId, 
+          LOWER(BIN_TO_UUID(cj.job_id)) as positionId,
+          LOWER(BIN_TO_UUID(cj.question_set_id)) as questionSetId, 
+          cj.link_active_at as linkActiveAt, 
+          cj.link_expires_at as linkExpiresAt,
+          cj.candidate_name as candidateName,
+          cj.job_title as positionName,
+          c.email as candidateEmail
+         FROM \`${tenantDb}\`.candidates_job cj
+         JOIN \`candidates_db\`.ats_candidates c ON c.id = cj.candidate_id
+         WHERE cj.id = UNHEX(?) LIMIT 1`,
+        [hexId]
+      );
+      if (rows && rows.length > 0) {
+        const r = rows[0];
+        return {
+          candidateId: r.candidateId,
+          positionId: r.positionId,
+          questionSetId: r.questionSetId,
+          linkActiveAt: r.linkActiveAt,
+          linkExpiresAt: r.linkExpiresAt,
+          candidateName: r.candidateName,
+          positionName: r.positionName,
+          candidateEmail: r.candidateEmail
+        };
+      }
+    }
+
     if (tables.includes('candidate_positions')) {
       const rows = await db.query(
         `SELECT cp.position_candidate_id as positionCandidateId, cp.candidate_id as candidateId, cp.position_id as positionId,
