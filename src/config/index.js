@@ -1,6 +1,9 @@
 const path = require('path');
 const dotenv = require('dotenv');
 
+// Snapshot real runtime environment before reading project .env files.
+const initialRuntimeEnv = { ...process.env };
+
 // Determine runtime mode from real environment (before reading project .env files).
 const runtimeNodeEnv = String(process.env.NODE_ENV || '').toLowerCase();
 const isHostedRuntime = Boolean(process.env.RENDER || process.env.RENDER_EXTERNAL_URL);
@@ -12,7 +15,25 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 // Load local overrides only for local development.
 // In hosted environments (Render/etc.) or production, never apply .env.local.
 if (!isHostedRuntime && !isProductionRuntime) {
+	// In local dev, .env.local should override .env defaults.
+	// After that, restore explicit runtime values passed by shell/start scripts.
 	dotenv.config({ path: path.resolve(__dirname, '../../.env.local'), override: true });
+
+	const runtimePriorityKeys = [
+		'AUTH_SERVICE_URL',
+		'STREAMING_SERVICE_URL',
+		'AI_SERVICE_URL',
+		'CANDIDATE_SERVICE_URL',
+		'SSL_PORT',
+		'SSL_KEY_PATH',
+		'SSL_CERT_PATH',
+		'CORS_ORIGINS'
+	];
+	for (const key of runtimePriorityKeys) {
+		if (Object.prototype.hasOwnProperty.call(initialRuntimeEnv, key) && initialRuntimeEnv[key] !== undefined) {
+			process.env[key] = initialRuntimeEnv[key];
+		}
+	}
 }
 
 const config = {

@@ -375,6 +375,30 @@ class AtsCandidateModel {
     return await db.query(`SELECT * FROM \`${tenantDb}\`.\`ats_job_stages\` ORDER BY sort_order ASC`);
   }
 
+  static async createJobStage(tenantDb, stageData) {
+    if (!tenantDb) throw new Error('tenantDb is required');
+    await this.ensureAtsCandidatesTable(tenantDb);
+
+    const { stageId, title, description, icon, color } = stageData;
+    const nextSortRows = await db.query(
+      `SELECT COALESCE(MAX(sort_order), -1) + 1 as next_sort FROM \`${tenantDb}\`.\`ats_job_stages\``
+    );
+    const nextSort = Number(nextSortRows?.[0]?.next_sort || 0);
+
+    await db.query(
+      `INSERT INTO \`${tenantDb}\`.\`ats_job_stages\`
+        (stage_id, title, description, icon, color, sort_order, is_fixed)
+       VALUES (?, ?, ?, ?, ?, ?, 0)`,
+      [stageId, title, description || '', icon || 'Activity', color || 'bg-slate-50 border-slate-200 text-slate-500', nextSort]
+    );
+
+    const createdRows = await db.query(
+      `SELECT * FROM \`${tenantDb}\`.\`ats_job_stages\` WHERE stage_id = ? LIMIT 1`,
+      [stageId]
+    );
+    return createdRows?.[0] || null;
+  }
+
   static async createCandidate(tenantDb, organizationId, candidateData) {
     const globalDatabase = 'candidates_db';
     await this.ensureAtsCandidatesTable(tenantDb);

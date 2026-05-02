@@ -300,6 +300,35 @@ class AtsCandidateService {
         if (!organizationId) throw new Error('organization_id is required');
         return await AtsCandidateModel.getJobStages(tenantDb, organizationId);
     }
+
+    static async createJobStage(tenantDb, organizationId, data = {}) {
+        if (!organizationId) throw new Error('organization_id is required');
+        const title = String(data.title || '').trim();
+        if (!title) throw new Error('title is required');
+
+        const existingStages = await AtsCandidateModel.getJobStages(tenantDb, organizationId);
+        const existingIds = new Set(existingStages.map(s => String(s.stage_id || '').toLowerCase()));
+
+        const baseId = title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_+|_+$/g, '') || 'custom_stage';
+
+        let stageId = baseId;
+        let suffix = 2;
+        while (existingIds.has(stageId.toLowerCase())) {
+            stageId = `${baseId}_${suffix}`;
+            suffix += 1;
+        }
+
+        return await AtsCandidateModel.createJobStage(tenantDb, {
+            stageId,
+            title,
+            description: String(data.description || '').trim(),
+            icon: data.icon || 'Activity',
+            color: data.color || 'bg-slate-50 border-slate-200 text-slate-500'
+        });
+    }
     
     static async deleteCandidate(tenantDb, applicationId) {
         if (!applicationId) throw new Error('applicationId is required');

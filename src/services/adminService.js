@@ -604,6 +604,14 @@ const updateCompanyDetails = async (tenantDb, organizationId, details) => {
         linkedinUrl, instagramUrl, facebookUrl, aboutUs
     } = details;
 
+    const normalizedFoundedYear = (
+        foundedYear === undefined ||
+        foundedYear === null ||
+        (typeof foundedYear === 'string' && foundedYear.trim() === '')
+    )
+        ? null
+        : parseInt(foundedYear, 10);
+
     const idBuffer = Buffer.from(uuidv4().replace(/-/g, ''), 'hex');
     await db.query(
         `INSERT INTO \`${tenantDb}\`.company_details (
@@ -631,7 +639,7 @@ const updateCompanyDetails = async (tenantDb, organizationId, details) => {
             idBuffer, orgIdBuffer,
             companyName, companyEmail, address,
             country, state, city, pincode,
-            industryType, foundedYear, websiteUrl,
+            industryType, Number.isNaN(normalizedFoundedYear) ? null : normalizedFoundedYear, websiteUrl,
             linkedinUrl, instagramUrl, facebookUrl, aboutUs
         ]
     );

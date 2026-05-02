@@ -13,6 +13,17 @@ exports.addCandidate = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'organization_id is required' });
         }
 
+        // Parse JSON strings from multipart form
+        let skills = req.body.skills;
+        if (typeof skills === 'string') {
+            try { skills = JSON.parse(skills); } catch (e) { skills = []; }
+        }
+
+        let extractedJson = req.body.extracted_json;
+        if (typeof extractedJson === 'string') {
+            try { extractedJson = JSON.parse(extractedJson); } catch (e) { extractedJson = null; }
+        }
+
         // Handle File Upload if present
         let resumeUrl = req.body.resume_url || '';
         let resumeFilename = req.body.resume_filename || '';
@@ -29,6 +40,7 @@ exports.addCandidate = async (req, res, next) => {
                 try {
                     const extractService = require('../services/extractService');
                     // We use a temporary UUID for extraction linked to this job if provided
+                    const { v4: uuidv4 } = require('uuid');
                     const tempCandidateId = uuidv4(); 
                     const extraction = await extractService.extractAndSaveResume(
                         req.tenantDb, 
@@ -54,17 +66,6 @@ exports.addCandidate = async (req, res, next) => {
             } catch (uploadErr) {
                 console.warn('[AtsCandidateController] Failed to upload resume during creation:', uploadErr.message);
             }
-        }
-
-        // Parse JSON strings from multipart form
-        let skills = req.body.skills;
-        if (typeof skills === 'string') {
-            try { skills = JSON.parse(skills); } catch (e) { skills = []; }
-        }
-
-        let extractedJson = req.body.extracted_json;
-        if (typeof extractedJson === 'string') {
-            try { extractedJson = JSON.parse(extractedJson); } catch (e) { extractedJson = null; }
         }
 
         const candidateData = {
@@ -99,6 +100,11 @@ exports.addCandidate = async (req, res, next) => {
                 );
                 const jobSkills = skillRows.map(r => r.skill);
                 job.skills = jobSkills;
+
+                // Fetch the dynamic AI scoring settings
+                const adminService = require('../services/adminService');
+                const aiSettings = await adminService.getAiScoringSettings(req.tenantDb, organizationId);
+                const scoringWeights = aiSettings?.resume?.weightage || aiSettings?.weightage || {};
                 
                 const payload = {
                     positionId: candidateData.job_id,
@@ -108,7 +114,8 @@ exports.addCandidate = async (req, res, next) => {
                     resumeText: extractedJson?.raw_text || '',
                     jobDescriptionText: job.job_description || '',
                     skills: extractedJson?.skills || job.skills || [],
-                    extractedData: extractedJson
+                    extractedData: extractedJson,
+                    scoringWeights: scoringWeights
                 };
 
                 console.log(`[AtsCandidateController] Calling ${streamingUrl}/resume-ats/calculate-score for candidate ${id}...`);
@@ -358,6 +365,31 @@ exports.getJobStages = async (req, res, next) => {
 
         const stages = await AtsCandidateService.getJobStages(req.tenantDb, organizationId);
         return res.status(200).json({ success: true, data: stages });
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.createJobStage = async (req, res, next) => {
+    try {
+        const organizationId = req.user?.organizationId || req.user?.organization_id || req.body.organization_id;
+        if (!organizationId) {
+            return res.status(400).json({ success: false, message: 'organization_id is required' });
+        }
+
+        const title = String(req.body?.title || '').trim();
+        if (!title) {
+            return res.status(400).json({ success: false, message: 'title is required' });
+        }
+
+        const created = await AtsCandidateService.createJobStage(req.tenantDb, organizationId, {
+            title,
+            description: req.body?.description,
+            icon: req.body?.icon,
+            color: req.body?.color
+        });
+
+        return res.status(201).json({ success: true, data: created, message: 'Stage created successfully' });
     } catch (error) {
         next(error);
     }
